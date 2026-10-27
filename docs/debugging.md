@@ -5,6 +5,8 @@
 1. 用 VS Code 断点调试网关和地端。
 2. 用 Postman 主动“推消息”、接收“推送”，包括把 Postman 当成一台假设备。
 
+> 只想在终端里输入 JSON 快速自测？先看 [self-test.md](self-test.md) 的 `termioctl` REPL。
+
 ## 1. VS Code 调试
 
 ### 前置

@@ -10,8 +10,8 @@
 ## 构建
 
 ```bash
-make build          # bin/termio, bin/termio-gateway；Windows 额外产出 bin/termio-agent.exe
-make build-all      # dist/ 下 6 个平台 + Windows GUI agent
+make build          # bin/termio, bin/termio-gateway, bin/termioctl；Windows 额外产出 bin/termio-agent.exe
+make build-all      # dist/ 下 6 个平台的三个二进制 + Windows GUI agent
 make test
 make vet
 ```

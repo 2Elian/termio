@@ -11,6 +11,7 @@
 | [operations.md](operations.md) | 配置、CLI、三端自启动、网关、构建、排障 |
 | [cloud-agent-integration.md](cloud-agent-integration.md) | 把 Termio 接入自己的云端 Agent |
 | [debugging.md](debugging.md) | VS Code 断点调试、Postman/WebSocket 手动推消息教程 |
+| [self-test.md](self-test.md) | 启动后用 termioctl 输入 JSON 自测；Postman 集合用法 |
 | [postman/termio.postman_collection.json](postman/termio.postman_collection.json) | 可直接导入的 Postman HTTP 集合 |
 
 产品定位和快速开始见仓库根目录的 [README.md](../README.md)。

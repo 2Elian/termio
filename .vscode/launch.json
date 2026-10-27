@@ -41,6 +41,21 @@
       ],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal"
+    },
+    {
+      "name": "Termio CLI (REPL)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/termioctl",
+      "args": [
+        "--gateway", "http://127.0.0.1:8787",
+        "--token", "dev-token",
+        "--device", "dev_debug",
+        "--interactive"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
     }
   ],
   "compounds": [

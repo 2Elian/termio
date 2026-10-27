@@ -8,6 +8,7 @@ build:
 	mkdir -p bin
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/termio ./cmd/termio
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/termio-gateway ./cmd/termio-gateway
+	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/termioctl ./cmd/termioctl
 	@if [ "$$($(GO) env GOOS)" = "windows" ]; then \
 		echo "building Windows GUI agent"; \
 		$(GO) build -trimpath -ldflags "$(LDFLAGS) -H=windowsgui" -o bin/termio-agent.exe ./cmd/termio; \
@@ -30,6 +31,8 @@ build-all:
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o "dist/termio-$$os-$$arch$$ext" ./cmd/termio || exit 1; \
 		echo "building gateway $$os/$$arch"; \
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o "dist/termio-gateway-$$os-$$arch$$ext" ./cmd/termio-gateway || exit 1; \
+		echo "building termioctl $$os/$$arch"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o "dist/termioctl-$$os-$$arch$$ext" ./cmd/termioctl || exit 1; \
 	done
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -trimpath -ldflags "$(LDFLAGS) -H=windowsgui" -o dist/termio-agent-windows-amd64.exe ./cmd/termio
 	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 $(GO) build -trimpath -ldflags "$(LDFLAGS) -H=windowsgui" -o dist/termio-agent-windows-arm64.exe ./cmd/termio

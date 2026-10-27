@@ -90,6 +90,7 @@ make build
 # 或
 go build -o bin/termio ./cmd/termio
 go build -o bin/termio-gateway ./cmd/termio-gateway
+go build -o bin/termioctl ./cmd/termioctl
 ```
 
 启动参考网关：
@@ -105,7 +106,18 @@ go build -o bin/termio-gateway ./cmd/termio-gateway
 ./bin/termio run
 ```
 
-调用：
+终端 JSON 自测（启动后另开一个终端）：
+
+```bash
+./bin/termioctl --gateway http://127.0.0.1:8787 --token dev-token
+# 然后输入：
+# {"name":"system_info","arguments":{}}
+# {"name":"search_files","arguments":{"pattern":"*.go","max_results":10}}
+```
+
+详细命令、JSON-RPC envelope、管道模式和 Postman 用法见 [docs/self-test.md](docs/self-test.md)。
+
+也可以直接用 curl 调网关：
 
 ```bash
 curl -H "Authorization: Bearer dev-token" http://127.0.0.1:8787/v1/devices
@@ -183,6 +195,7 @@ def call_tool(name, arguments, timeout_ms=30000, call_id=None):
 | [docs/operations.md](docs/operations.md) | 配置、CLI、三端自启动、网关、构建、排障 |
 | [docs/cloud-agent-integration.md](docs/cloud-agent-integration.md) | 云端 Agent 接入细节 |
 | [docs/debugging.md](docs/debugging.md) | VS Code 断点调试 + Postman/WebSocket 联调 |
+| [docs/self-test.md](docs/self-test.md) | 用 termioctl 在终端输入 JSON 自测；Postman 用法 |
 
 ## 当前状态
 

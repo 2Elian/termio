@@ -29,6 +29,9 @@ foreach ($target in $targets) {
     Write-Host "building gateway $name"
     go build -trimpath -ldflags $ldflags -o "dist/termio-gateway-$name$ext" ./cmd/termio-gateway
     if ($LASTEXITCODE -ne 0) { throw "gateway build failed for $name" }
+    Write-Host "building termioctl $name"
+    go build -trimpath -ldflags $ldflags -o "dist/termioctl-$name$ext" ./cmd/termioctl
+    if ($LASTEXITCODE -ne 0) { throw "termioctl build failed for $name" }
 }
 
 foreach ($arch in @("amd64", "arm64")) {
