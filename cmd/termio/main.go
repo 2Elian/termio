@@ -74,7 +74,7 @@ func runInit(args []string) error {
 	deviceName := fs.String("device-name", "", "human-readable device name")
 	logFile := fs.String("log-file", "", "log file path (default: per-user cache directory)")
 	logLevel := fs.String("log-level", "info", "debug, info, warn, or error")
-	workspaceFlag := fs.String("workspace", "", "workspace directory (default: ~/LARES; must exist)")
+	workspaceFlag := fs.String("workspace", "", "workspace directory (default: ~/.lares; must exist)")
 	force := fs.Bool("force", false, "overwrite an existing config")
 	var roots stringList
 	fs.Var(&roots, "root", "extra allowed root directory (repeatable)")
@@ -198,7 +198,15 @@ func runDaemon(args []string) error {
 	}
 	defer closer.Close()
 
-	sb, err := tools.NewSandbox(cfg.Workspace, cfg.AllowedRoots)
+	appData, err := config.AppDataDir()
+	if err != nil {
+		return err
+	}
+	deny := []string{appData, path}
+	if cfg.LogFile != "" {
+		deny = append(deny, cfg.LogFile)
+	}
+	sb, err := tools.NewSandbox(cfg.Workspace, cfg.AllowedRoots, deny...)
 	if err != nil {
 		return err
 	}
@@ -440,6 +448,16 @@ func runWorkspaceReset(args []string) error {
 }
 
 func loadConfig(flagValue string) (*config.Config, string, error) {
+	if flagValue == "" {
+		cfg, path, migrated, err := config.LoadDefault()
+		if err != nil {
+			return nil, path, err
+		}
+		if migrated {
+			fmt.Fprintf(os.Stderr, "Migrated config to %s\n", path)
+		}
+		return cfg, path, nil
+	}
 	path, err := resolvePath(flagValue)
 	if err != nil {
 		return nil, "", err
@@ -515,7 +533,7 @@ Usage:
 
 Notes:
   - The gateway URL must use wss:// unless it is loopback (ws://127.0.0.1).
-  - The default workspace is ~/LARES. --workspace selects an existing directory.
+  - The default workspace is ~/.lares. --workspace selects an existing directory.
   - --root adds extra allowed roots; tools can only access the workspace and extras.
   - With only --root and no --workspace, the first root becomes the workspace (compatibility).
   - The config default is the per-user config directory (termio/config.json).

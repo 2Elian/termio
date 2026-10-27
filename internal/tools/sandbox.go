@@ -15,12 +15,17 @@ import (
 // escapes discovered at open time.
 var ErrOutsideRoots = errors.New("path is outside the allowed roots")
 
+// ErrDeniedPath is returned for the daemon's private data directory, which may
+// live inside the default workspace but must never be exposed to tools.
+var ErrDeniedPath = errors.New("path is reserved for Termio")
+
 // Sandbox restricts file access to a workspace plus optional extra roots. It
 // uses os.Root so symlink and junction escapes are rejected by the operating
 // system at open time, not merely by string comparison.
 type Sandbox struct {
 	workspace string
 	all       []string // workspace first, then extras (deduplicated, display order)
+	deny      []string // private paths (canonical) that tools may never access
 	roots     []*rootEntry
 }
 
@@ -38,12 +43,25 @@ type Resolved struct {
 }
 
 // NewSandbox opens the workspace and extra roots. All paths must be existing
-// directories; callers normally pass config.NormalizeWorkspace output.
-func NewSandbox(workspace string, extraRoots []string) (*Sandbox, error) {
+// directories; callers normally pass config.NormalizeWorkspace output. Deny
+// paths are canonicalized but need not exist; no root may sit inside one.
+func NewSandbox(workspace string, extraRoots []string, denyPaths ...string) (*Sandbox, error) {
 	ws, err := normalizeSandboxDir(workspace, "workspace")
 	if err != nil {
 		return nil, err
 	}
+	deny := make([]string, 0, len(denyPaths))
+	for _, raw := range denyPaths {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		normalized, err := canonicalSandboxPath(raw)
+		if err != nil {
+			return nil, fmt.Errorf("deny path %q: %w", raw, err)
+		}
+		deny = append(deny, normalized)
+	}
+
 	all := []string{ws}
 	seen := map[string]bool{pathKey(ws): true}
 	for _, raw := range extraRoots {
@@ -58,8 +76,15 @@ func NewSandbox(workspace string, extraRoots []string) (*Sandbox, error) {
 		seen[key] = true
 		all = append(all, normalized)
 	}
+	for _, root := range all {
+		for _, denied := range deny {
+			if pathWithin(denied, root) {
+				return nil, fmt.Errorf("root %q is inside the reserved Termio data directory %q", root, denied)
+			}
+		}
+	}
 
-	sb := &Sandbox{workspace: ws, all: all}
+	sb := &Sandbox{workspace: ws, all: all, deny: deny}
 	for _, path := range all {
 		root, err := os.OpenRoot(path)
 		if err != nil {
@@ -126,6 +151,9 @@ func (s *Sandbox) Resolve(requestPath string) (*Resolved, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", requested, err)
 	}
+	if s.IsDenied(canonical) {
+		return nil, ErrDeniedPath
+	}
 	for _, entry := range s.roots {
 		rel, err := filepath.Rel(entry.display, canonical)
 		if err != nil {
@@ -146,6 +174,55 @@ func (s *Sandbox) Resolve(requestPath string) (*Resolved, error) {
 		}, nil
 	}
 	return nil, ErrOutsideRoots
+}
+
+// IsDenied reports whether an absolute path is inside a private Termio path.
+// Search uses it even when include_hidden would otherwise descend into the
+// app data directory.
+func (s *Sandbox) IsDenied(path string) bool {
+	if len(s.deny) == 0 {
+		return false
+	}
+	clean := filepath.Clean(path)
+	for _, denied := range s.deny {
+		if pathWithin(denied, clean) {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalSandboxPath(path string) (string, error) {
+	expanded, err := expandHome(path)
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(expanded)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := resolveExisting(abs)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(canonical), nil
+}
+
+// pathWithin reports whether target is base or inside base. Both paths are
+// expected to be canonical absolute paths. Comparison is case-insensitive on
+// Windows.
+func pathWithin(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return false
+	}
+	return true
 }
 
 func normalizeSandboxDir(path, label string) (string, error) {

@@ -3,12 +3,16 @@
 > **状态：V1 已实现。**
 >
 > 配置字段 `workspace`、`termio workspace show/set/reset`、工具默认路径/相对路径、`system_info.workspace` 均已落地。当前 `allowed_roots` 仅作为额外根。
+>
+> 本文用 **`$LARES`** 表示端子的 app home：默认 `~/.lares`（Windows `%USERPROFILE%\.lares`），可用 `TERMIO_HOME` / `LARES_HOME` 覆盖。端子信息（config、log）放在 `$LARES/.termio`。
 
 ## 1. 概念
 
 **工作区**是用户本机上的一个目录，也是端子默认的“工作范围”。
 
-- 默认工作区：用户 home 目录下的 `LARES`。
+- **`$LARES`**：端子的 app home，默认 `~/.lares`。
+- **默认工作区**：`$LARES`。
+- **端子信息**：`$LARES/.termio`（config.json、termio.log 等），永远不对工具开放。
 - 用户可以在本地选择一个已存在的目录作为工作区；之后工具的默认路径、相对路径和默认搜索范围都在该工作区下。
 - 一个端子同一时间只有一个活动工作区。
 - 工作区只由**本地用户**选择；云端 Agent 不能通过 `tools/call` 更改。
@@ -18,18 +22,19 @@
 
 ## 2. 默认路径
 
-| 系统 | 默认工作区 |
-|---|---|
-| Windows | `%USERPROFILE%\LARES` |
-| macOS | `~/LARES` |
-| Linux | `~/LARES` |
+| 系统 | `$LARES`（默认工作区） | 端子信息 |
+|---|---|---|
+| Windows | `%USERPROFILE%\.lares` | `%USERPROFILE%\.lares\.termio` |
+| macOS | `~/.lares` | `~/.lares/.termio` |
+| Linux | `~/.lares` | `~/.lares/.termio` |
 
 规则：
 
-- `termio init` 未指定工作区时，使用上述默认路径。
-- 默认 `LARES` 不存在时，`init` 创建它（Unix 0700；Windows 使用用户目录 ACL）。
+- `termio init` 未指定工作区时，使用 `$LARES`。
+- 默认 `$LARES` 不存在时，`init` 创建它（Unix 0700；Windows 使用用户目录 ACL）。
 - 显式 `--workspace PATH` 时，`PATH` **必须已存在且是目录**，避免拼写错误创建任意目录。
 - 如果取不到用户 home 且没有显式指定工作区，`init` 报错并提示使用 `--workspace`。
+- `TERMIO_HOME` 或 `LARES_HOME` 可以覆盖 `$LARES`；端子信息始终在 `$LARES/.termio`。
 - 工作区路径会做绝对化和符号链接规范化（`EvalSymlinks`），再交给 `os.Root`。
 
 ## 3. 与 allowed_roots 的关系
@@ -49,7 +54,7 @@ effective_roots = dedupe([workspace] + allowed_roots)
 
 规则：
 
-- 新 `init`：`workspace = ~/LARES`，`allowed_roots = []`（除非用 `--root` 指定额外根）。
+- 新 `init`：`workspace = ~/.lares`，`allowed_roots = []`（除非用 `--root` 指定额外根）。
 - 旧配置没有 `workspace`：如果 `allowed_roots` 非空，取**第一个**作为工作区，其余作为额外根（迁移后有效根不变）。
 - `workspace` 始终进入有效根；`allowed_roots` 只表示额外根。
 - `workspace set` 只替换当前工作区：旧工作区默认**不再可访问**，除非它被显式列在 `allowed_roots` 里。这与“用户选择工作区后就在该工作区下工作”的语义一致。
@@ -60,7 +65,7 @@ effective_roots = dedupe([workspace] + allowed_roots)
 
 ```json
 {
-  "workspace": "C:\\Users\\alice\\LARES",
+  "workspace": "C:\\Users\\alice\\.lares",
   "gateway_url": "wss://gateway.example.com/ws",
   "device_id": "dev_...",
   "device_name": "alice-laptop",
@@ -69,7 +74,7 @@ effective_roots = dedupe([workspace] + allowed_roots)
   "max_concurrent_calls": 4,
   "call_timeout_ms": 30000,
   "log_level": "info",
-  "log_file": "C:\\Users\\alice\\AppData\\Local\\termio\\termio.log"
+  "log_file": "C:\\Users\\alice\\.lares\\.termio\\termio.log"
 }
 ```
 
@@ -77,40 +82,40 @@ effective_roots = dedupe([workspace] + allowed_roots)
 
 - `workspace` 必须是绝对路径、存在、是目录。
 - 规范化后加入有效根；重复项去重。
-- 工作区不可读时，启动失败或由 `doctor` 明确报错，**不要静默回退**到 home 或 `LARES`，否则会悄悄改变授权范围。
+- 工作区不可读时，启动失败或由 `doctor` 明确报错，**不要静默回退**到 home 或 `.lares`，否则会悄悄改变授权范围。
 
 ## 5. CLI 设计
 
 ### 初始化
 
 ```bash
-# 默认 ~/LARES
+# 默认 ~/.lares
 termio init --token <token>
 
 # 本地选择一个已存在的目录
 termio init --token <token> --workspace /home/alice/projects/acme
 
 # 额外根（高级）
-termio init --token <token> --workspace /home/alice/LARES --root /home/alice/shared
+termio init --token <token> --workspace /home/alice/.lares --root /home/alice/shared
 ```
 
 兼容规则：
 
 - 只给 `--root`、没给 `--workspace` 时，把第一个 `--root` 当作工作区，其余作为额外根；这样已有的 `termio init --root "$PWD"` 脚本不会被改变意图。
 - 同时给 `--workspace` 和 `--root` 时，`workspace + extra roots`。
-- 都不给：`~/LARES`。
+- 都不给：`~/.lares`。
 
 ### 查看/切换
 
 ```bash
 termio workspace show
 termio workspace set /home/alice/projects/acme
-termio workspace reset          # 回到默认 ~/LARES
+termio workspace reset          # 回到默认 ~/.lares
 ```
 
 - `show` 输出：当前路径、来源（默认/用户选择）、是否存在、是否可读、是否在有效根中。
 - `set` 只允许本地用户操作；校验目录存在；写入配置。旧工作区默认不再可访问，除非它被显式保留在 `allowed_roots` 里。
-- `reset` 回到 `~/LARES`；同样替换当前工作区，额外根保持不变。
+- `reset` 回到 `~/.lares`；同样替换当前工作区，额外根保持不变。
 - v1 没有配置热加载：切换后提示需要重启端子；重启时取消在途调用，新调用使用新工作区。
 - 云端没有“设置工作区”的接口；不要为此增加 HTTP/WS 方法。
 
@@ -148,7 +153,7 @@ termio workspace reset          # 回到默认 ~/LARES
 ```mermaid
 flowchart TD
   A[termio init] --> B{--workspace?}
-  B -- 否 --> C[默认 ~/LARES<br/>不存在则创建]
+  B -- 否 --> C[默认 ~/.lares<br/>不存在则创建]
   B -- 是 --> D[用户选择的已存在目录]
   C --> E[config.workspace]
   D --> E
@@ -165,20 +170,21 @@ flowchart TD
 ## 7. 安全与信任边界
 
 - **工作区选择是本地授权**：用户在本地选择目录，等价于把该目录的只读权限授予 Agent。云端不能替用户选择。
-- **默认目录不是安全边界**：`~/LARES` 只是默认值；真正的边界是 `os.Root` + 有效根。
-- **失败关闭**：工作区被删除、移动、权限变化时，工具返回错误；不自动切到 home 或 LARES。
+- **默认目录不是安全边界**：`~/.lares` 只是默认值；真正的边界是 `os.Root` + 有效根。
+- **`.termio` 是保留目录**：即使默认工作区就是 `$LARES`，工具也不能读写 `$LARES/.termio` 下的 config/token/log。沙箱把该目录加入 deny 列表；`search_files` 即使 `include_hidden: true` 也不会返回它，workspace 不能设在 `.termio` 内。自定义 config/log 如果位于工作区，也会被 deny。
+- **失败关闭**：工作区被删除、移动、权限变化时，工具返回错误；不自动切到 home 或 .lares。
 - **宽范围警告**：如果用户选择 home、`/` 或盘符根，CLI/UI 应明确警告；可以要求额外确认（例如 `--allow-broad-workspace`），避免误授权。
 - **符号链接**：工作区本身做 `EvalSymlinks`；工具路径仍在 `os.Root` 内解析，阻止 symlink/junction 逃逸。
 - **切换时机**：v1 建议在空闲时切换并重启；重启会取消在途调用，不会让旧调用落到新工作区。
 - **可移动/网络盘**：允许，但断开时工具会报错；不做自动重试或回退。
-- **多用户**：配置和工作区按 OS 用户隔离；`~/LARES` 天然是每个用户自己的。
+- **多用户**：配置和工作区按 OS 用户隔离；`~/.lares` 天然是每个用户自己的。
 - **多设备**：一个用户多台机器时，每台设备各自有本地工作区；云端不统一设置。
 
 ## 8. 迁移与兼容
 
 - 旧配置没有 `workspace`：
   - `allowed_roots` 非空 → **第一个**作为工作区，其余保留为额外根；
-  - 否则 → 默认 `~/LARES`，额外根为空。
+  - 否则 → 默认 `~/.lares`，额外根为空。
 - 新 `init` 总是写入 `workspace`，默认 `allowed_roots` 为空（除非用 `--root` 指定额外根）。
 - 旧客户端继续发绝对路径，行为不变；相对路径是新增能力。
 - `system_info` 多一个 `workspace` 字段；`allowed_roots` 仍返回有效根，属于向后兼容。
@@ -187,13 +193,14 @@ flowchart TD
 
 ## 9. 实现验收标准（开发时用）
 
-- [x] 新安装创建 `~/LARES`（存在则复用），配置写入 `workspace`，默认 `allowed_roots` 为空
+- [x] 新安装创建 `~/.lares`（存在则复用），配置写入 `workspace`，默认 `allowed_roots` 为空
 - [x] `init --workspace` 只接受已存在目录；不存在/不是目录时报错
 - [x] `search_files` 省略 `path` 时搜索工作区
 - [x] `read_file` 相对路径解析到工作区
 - [x] 绝对路径在有效根外时被拒绝
 - [x] 云端无法通过任何工具参数更改工作区
 - [x] 工作区 symlink 规范化；`os.Root` 阻止逃逸
+- [x] `.termio` 对工具不可见；`search_files` 即使 include_hidden 也不返回；workspace 不能设在 `.termio` 内
 - [x] 工作区缺失/不可读时配置加载/启动报错，不回退（`doctor` 尚未实现）
 - [x] `workspace set` 写配置并提示重启；旧工作区默认不再可访问，额外根保留
 - [ ] 重启后在途调用安全取消；新调用只使用新工作区（依赖现有重启语义，未做工作区专项测试）
@@ -207,10 +214,10 @@ flowchart TD
 
 当前实现按以下选择落地；如需调整，先改本节和代码，避免文档与行为脱节：
 
-1. 默认工作区是**用户 home 下的 `LARES`**（Windows `%USERPROFILE%\LARES`）。
+1. `$LARES` 默认是**用户 home 下的 `.lares`**（Windows `%USERPROFILE%\.lares`）；默认工作区是 `$LARES`；端子信息在 `$LARES/.termio`。
 2. 采用“`workspace` 为主 + `allowed_roots` 只放额外根”的模型；新 `init` 默认 `allowed_roots` 为空。
 3. 允许相对路径，相对工作区解析；`..` 不能逃出工作区。
-4. 默认 `LARES` 不存在时自动创建；显式 `--workspace` 要求目录已存在。
+4. 默认 `.lares` 不存在时自动创建；显式 `--workspace` 要求目录已存在。
 5. 选择 home、`/`、盘符根目前只打印 warning，不拦截；尚未加额外 flag 确认。
 6. 切换工作区时，旧工作区默认不再可访问（除非显式保留为额外根）。
 

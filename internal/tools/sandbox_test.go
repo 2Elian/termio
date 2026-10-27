@@ -187,6 +187,66 @@ func TestSymlinkInsideRootAllowed(t *testing.T) {
 	f.Close()
 }
 
+func TestDeniedPath(t *testing.T) {
+	workspace := t.TempDir()
+	appData := filepath.Join(workspace, ".termio")
+	if err := os.MkdirAll(appData, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appData, "config.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "ok.txt"), []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := NewSandbox(workspace, nil, appData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sb.Close()
+
+	if _, err := sb.Resolve(filepath.Join(appData, "config.json")); !errors.Is(err, ErrDeniedPath) {
+		t.Fatalf("err = %v, want ErrDeniedPath", err)
+	}
+	if _, err := sb.Resolve(".termio"); !errors.Is(err, ErrDeniedPath) {
+		t.Fatalf("err = %v, want ErrDeniedPath", err)
+	}
+	if _, err := sb.Resolve("ok.txt"); err != nil {
+		t.Fatalf("normal file should resolve: %v", err)
+	}
+	if !sb.IsDenied(filepath.Join(sb.Workspace(), ".termio", "config.json")) {
+		t.Fatal("IsDenied should be true for app data")
+	}
+}
+
+func TestDeniedWorkspaceRejected(t *testing.T) {
+	appData := filepath.Join(t.TempDir(), ".termio")
+	if err := os.MkdirAll(appData, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSandbox(appData, nil, appData); err == nil {
+		t.Fatal("workspace equal to the app data dir should be rejected")
+	}
+	sub := filepath.Join(appData, "sub")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSandbox(sub, nil, appData); err == nil {
+		t.Fatal("workspace inside the app data dir should be rejected")
+	}
+}
+
+func TestExtraRootInsideDeniedRejected(t *testing.T) {
+	appData := filepath.Join(t.TempDir(), ".termio")
+	if err := os.MkdirAll(appData, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	if _, err := NewSandbox(workspace, []string{appData}, appData); err == nil {
+		t.Fatal("extra root inside the app data dir should be rejected")
+	}
+}
+
 func TestDuplicateRootsDeduped(t *testing.T) {
 	root := t.TempDir()
 	sb := newTestSandbox(t, root, root)

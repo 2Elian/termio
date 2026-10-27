@@ -36,13 +36,32 @@ go build -trimpath -ldflags "-s -w -X termio/internal/version.Version=0.1.0" -o 
 
 | 系统 | 配置 |
 |---|---|
-| Windows | `%AppData%\termio\config.json` |
-| macOS | `~/Library/Application Support/termio/config.json` |
-| Linux | `~/.config/termio/config.json` |
+| Windows | `%USERPROFILE%\.lares\.termio\config.json` |
+| macOS | `~/.lares/.termio/config.json` |
+| Linux | `~/.lares/.termio/config.json` |
 
-默认日志在用户缓存目录：Windows `%LocalAppData%\termio\termio.log`，macOS `~/Library/Caches/termio/termio.log`，Linux `~/.cache/termio/termio.log`。
+也就是说：
 
-默认工作区：Windows `%USERPROFILE%\LARES`，macOS/Linux `~/LARES`；不存在时由 `termio init` 创建。
+```
+$LARES          = 端子 app home，默认 ~/.lares（Windows %USERPROFILE%\.lares）
+$LARES/.termio  = 端子信息：config.json、termio.log 等
+默认工作区       = $LARES
+```
+
+默认日志：`$LARES/.termio/termio.log`（Windows `%USERPROFILE%\.lares\.termio\termio.log`，macOS/Linux `~/.lares/.termio/termio.log`）。
+
+`$LARES` 可以用环境变量 `TERMIO_HOME` 或 `LARES_HOME` 覆盖；例如：
+
+```bash
+# Windows PowerShell
+$env:LARES_HOME = "C:\Users\Administrator\.laes"
+# Linux/macOS
+export TERMIO_HOME="$HOME/.lares"
+```
+
+默认工作区不存在时由 `termio init` 创建。端子信息目录 `.termio` 永远不对工具开放（即使默认工作区就是 `$LARES`，工具也无法读取其中的 config/token/log）。
+
+> **从旧版本升级**：如果新路径不存在、但旧的 `UserConfigDir/termio/config.json`（Windows `%AppData%\termio\config.json`）存在，首次 `run` / `install` / `workspace` 会自动迁移到 `$LARES/.termio/config.json`；旧配置的第一个 `allowed_roots` 变成 workspace，旧的默认日志路径会改成新默认日志。旧文件保留不删。
 
 完整示例：
 
@@ -52,12 +71,12 @@ go build -trimpath -ldflags "-s -w -X termio/internal/version.Version=0.1.0" -o 
   "device_id": "dev_0e59845886b548db6f5dcaf4df7d818a",
   "device_name": "my-laptop",
   "token": "device-token",
-  "workspace": "C:\\Users\\alice\\LARES",
+  "workspace": "C:\\Users\\alice\\.lares",
   "allowed_roots": [],
   "max_concurrent_calls": 4,
   "call_timeout_ms": 30000,
   "log_level": "info",
-  "log_file": "C:\\Users\\alice\\AppData\\Local\\termio\\termio.log"
+  "log_file": "C:\\Users\\alice\\.lares\\.termio\\termio.log"
 }
 ```
 
@@ -67,12 +86,12 @@ go build -trimpath -ldflags "-s -w -X termio/internal/version.Version=0.1.0" -o 
 | `device_id` | 是 | 1–128 个字母/数字/`.`/`-`/`_`；`init` 自动生成 |
 | `device_name` | 否 | 展示名，默认主机名 |
 | `token` | 是 | 设备或共享 Bearer token |
-| `workspace` | 是 | 默认工作目录；默认 `~/LARES`；必须存在且是目录 |
+| `workspace` | 是 | 默认工作目录；默认 `~/.lares`；必须存在且是目录 |
 | `allowed_roots` | 否 | **额外**允许目录；绝对路径；不要放 workspace 的副本 |
 | `max_concurrent_calls` | 否 | 1–32，默认 4 |
 | `call_timeout_ms` | 否 | 1000–300000，默认 30000 |
 | `log_level` | 否 | `debug` / `info` / `warn` / `error` |
-| `log_file` | 否 | 绝对路径；默认用户缓存目录 |
+| `log_file` | 否 | 绝对路径；默认 `$LARES/.termio/termio.log` |
 
 > 工作区语义、相对路径和迁移规则见 [workspace.md](workspace.md)。`workspace` 由本地用户选择，云端不能更改。
 
@@ -104,11 +123,11 @@ termio init \
   --url wss://gateway.example.com/ws \
   --token "$TERMIO_TOKEN" \
   --workspace "$HOME/projects/acme" \
-  --log-file "$HOME/.cache/termio/termio.log"
+  --log-file "$HOME/.lares/.termio/termio.log"
 
-# 默认工作区 ~/LARES；额外根用 --root（可重复）
+# 默认工作区 ~/.lares；额外根用 --root（可重复）
 termio init --token "$TERMIO_TOKEN"
-termio init --token "$TERMIO_TOKEN" --workspace "$HOME/LARES" --root "$HOME/shared"
+termio init --token "$TERMIO_TOKEN" --workspace "$HOME/.lares" --root "$HOME/shared"
 ```
 
 Windows PowerShell：
@@ -118,10 +137,10 @@ Windows PowerShell：
   --url wss://gateway.example.com/ws `
   --token $env:TERMIO_TOKEN `
   --workspace "$env:USERPROFILE\projects\acme" `
-  --log-file "$env:LOCALAPPDATA\termio\termio.log"
+  --log-file "$env:USERPROFILE\.lares\.termio\termio.log"
 ```
 
-- `--workspace` 省略时使用默认 `~/LARES`，不存在会自动创建。
+- `--workspace` 省略时使用默认 `~/.lares`，不存在会自动创建。
 - `--workspace` 显式指定时目录必须已存在。
 - `--root` 是额外根，可重复；不要用 `C:\`、`/` 或整个 home 作为 workspace，除非你明确接受这个暴露面。
 - 只传 `--root`、不传 `--workspace` 时，第一个 root 作为工作区，其余作为额外根（兼容旧脚本）。
@@ -167,7 +186,7 @@ termio uninstall
 - `launchctl bootstrap gui/<uid> <plist>`
 - 需要 GUI 登录会话；SSH 会话中可能失败
 - 受 TCC 保护的目录需要给二进制授予 **Full Disk Access**
-- 日志：`~/Library/Logs/termio/termio.out.log` / `.err.log`
+- 日志：`~/.lares/.termio/termio.out.log` / `.err.log`
 
 ### Windows
 

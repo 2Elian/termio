@@ -23,6 +23,7 @@ Termio 的本质是“让云端按需读取用户本机文件”。这是一个�
 | 攻击面 | 缓解 |
 |---|---|
 | 路径穿越 / 符号链接逃逸 | workspace/绝对或相对路径 + `os.Root` + 组件级包含检查 |
+| 工具读取端子配置/令牌 | `$LARES/.termio` 加入沙箱 deny 列表；自定义 config/log 也 deny |
 | 云端被攻破后调用危险工具 | 只读工具白名单，无 shell/写操作 |
 | token 泄露 | 每设备独立 token、TLS、0600 存储、轮换（v1 未实现轮换） |
 | 跨租户访问 | 按设备 token 鉴权；共享 token 仅开发用 |
@@ -70,7 +71,8 @@ X-Termio-Device: <device_id>
 - 没有 shell、PTY、写文件、删除、进程管理、网络工具。
 - 工具名和参数由地端校验；云端无法调用未注册的工具。
 - 每台设备只打开自己的 `workspace` 和额外 `allowed_roots`；不同租户的文件在物理上由不同地端进程隔离。
-- 工作区由本地用户选择，默认 `~/LARES`；云端不能通过工具参数更改工作区。选择工作区等于授权 Agent 访问该目录，见 [workspace.md](workspace.md)。
+- 工作区由本地用户选择，默认 `$LARES`（`~/.lares`）；云端不能通过工具参数更改工作区。选择工作区等于授权 Agent 访问该目录，见 [workspace.md](workspace.md)。
+- 端子信息（config、token、日志）在 `$LARES/.termio`，即使它在默认工作区内也被沙箱 deny，工具不可读写；自定义 config/log 位于工作区时同样 deny。
 - 云端 Agent 的工具 stub 应只暴露业务需要的工具；不要把整个 registry 无差别地交给模型。
 
 ## 沙箱
@@ -79,6 +81,7 @@ X-Termio-Device: <device_id>
 
 - workspace 和每个额外 allowed root 用 `os.OpenRoot` 打开。
 - 空路径/相对路径以 workspace 为基准；相对路径的 `..` 不能逃出 workspace；绝对路径必须在 workspace 或额外根内。
+- `$LARES/.termio` 以及实际 config/log 路径是 deny 路径；workspace 或额外根不能设在 deny 路径内。
 - 拒绝 UNC、Windows 设备路径、`C:foo`、NTFS ADS 和越界 `..`。
 - 请求路径先规范化（符号链接、8.3 短名），再与 root 做组件级比较。
 - `os.Root` 在打开时再次阻止符号链接/junction 逃逸，消除 check-then-open 的 TOCTOU。
@@ -118,7 +121,7 @@ X-Termio-Device: <device_id>
 - 不记录 token、Authorization 头、工具参数或文件内容。
 - 网关记录设备 ID、工具名、callId、HTTP 状态、耗时；debug 级别记录进度消息。
 - 地端记录启动、注册、连接错误、工具名、callId；不记录路径参数。
-- 日志文件默认在用户缓存目录；生产环境应限制权限并配置轮转。
+- 日志文件默认在 `$LARES/.termio/termio.log`；生产环境应限制权限并配置轮转。
 
 ## 参考网关的生产化清单
 
@@ -151,4 +154,4 @@ X-Termio-Device: <device_id>
 - 无设备配对/OAuth、mTLS、token 轮换。
 - 无写操作审批、能力声明、审计数据库。
 - 无持久化幂等日志；地端重启后重试可能重复执行。
-- 只读工具，但 `read_file` 仍可能读取敏感文件；allowed roots 必须按最小权限配置。
+- 只读工具，但 `read_file` 仍可能读取敏感文件；workspace/额外 roots 必须按最小权限配置。

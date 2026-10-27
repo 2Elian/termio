@@ -142,6 +142,13 @@ func (t *SearchFiles) Call(ctx context.Context, raw json.RawMessage, progress Pr
 			}
 			return nil
 		}
+		absolute := filepath.Join(resolved.Entry.display, filepath.FromSlash(p))
+		if t.sandbox.IsDenied(absolute) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
 
 		result.Scanned++
 		if progress != nil && result.Scanned%512 == 0 {

@@ -8,7 +8,7 @@
 - Go 单静态二进制，Windows / macOS / Linux（amd64 / arm64）
 - 工具方法/结果遵循 MCP 形状，接入现有 Agent 框架成本低
 - 只读工具 + `os.Root` 沙箱 + 每设备 token，默认最小权限
-- 默认在 `~/LARES` 工作区下工作；用户可本地切换，云端不能更改
+- 默认在 `~/.lares` 工作区下工作；端子信息在 `~/.lares/.termio`（工具不可读写）；用户可本地切换，云端不能更改
 - 自带单实例参考网关，开箱即可端到端联调
 
 ## 背景与问题
@@ -175,7 +175,7 @@ def call_tool(name, arguments, timeout_ms=30000, call_id=None):
 | 文档 | 内容 |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 组件、连接生命周期、部署拓扑、多租户、UI 选型、多实例扩展 |
-| [docs/workspace.md](docs/workspace.md) | 工作区：默认 `~/LARES`、本地切换、相对路径规则、安全边界 |
+| [docs/workspace.md](docs/workspace.md) | 工作区：默认 `~/.lares`、本地切换、相对路径规则、安全边界 |
 | [docs/roadmap.md](docs/roadmap.md) | V1.x / V2 / V3 计划与验收标准 |
 | [docs/protocol.md](docs/protocol.md) | WebSocket/JSON-RPC、HTTP API、错误码、幂等、限额 |
 | [docs/tools.md](docs/tools.md) | 内置工具、沙箱、**新增工具（二开）教程** |
@@ -187,7 +187,7 @@ def call_tool(name, arguments, timeout_ms=30000, call_id=None):
 ## 当前状态
 
 - v1 提供三个只读工具，不包含 shell/写操作。
-- 工作区已实现：默认 `~/LARES`，用户可本地选择其他目录，工具默认在 workspace 下工作；见 [docs/workspace.md](docs/workspace.md)。
+- 工作区已实现：默认 `~/.lares`，端子信息在 `~/.lares/.termio`（沙箱 deny，工具不可读写）；用户可本地选择其他目录。见 [docs/workspace.md](docs/workspace.md)。
 - `termio-gateway` 是**参考实现**：单实例、内存态，不适合直接作为公网多租户服务。
 - 设备配对/OAuth、mTLS、token 轮换、端到端加密、写操作审批、离线任务队列尚未实现；生产化清单见安全文档。
 - Windows 已做本机端到端验证；macOS/Linux 产物已交叉编译，尚未在真实机器上运行验证。

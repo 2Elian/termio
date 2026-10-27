@@ -22,7 +22,7 @@ type Tool interface {
 
 ## 内置工具
 
-> **工作区**：省略 `path` 时默认使用 workspace（默认 `~/LARES`）；相对路径相对 workspace 解析，且 `..` 不能逃出 workspace。完整语义见 [workspace.md](workspace.md)。
+> **工作区**：省略 `path` 时默认使用 workspace（默认 `~/.lares`）；相对路径相对 workspace 解析，且 `..` 不能逃出 workspace。完整语义见 [workspace.md](workspace.md)。
 
 ### `search_files`
 
@@ -73,7 +73,7 @@ type Tool interface {
 无参数，返回：
 
 ```json
-{"os":"windows","arch":"amd64","hostname":"...","termio_version":"0.1.0","workspace":"C:\\Users\\alice\\LARES","allowed_roots":["C:\\Users\\alice\\LARES"]}
+{"os":"windows","arch":"amd64","hostname":"...","termio_version":"0.1.0","workspace":"C:\\Users\\alice\\.lares","allowed_roots":["C:\\Users\\alice\\.lares"]}
 ```
 
 `workspace` 是当前工作区；`allowed_roots` 是有效根（workspace + 额外根）。
@@ -83,6 +83,7 @@ type Tool interface {
 - workspace 和每个额外 `allowed_roots` 都用 `os.OpenRoot` 打开，之后所有访问都通过 `os.Root`。
 - 空路径或相对路径以 workspace 为基准；相对路径的 `..` 不能逃出 workspace。
 - 绝对路径可以访问 workspace 或额外根；拒绝 `..` 越界、Windows UNC/设备路径、`C:foo` 盘符相对路径、NTFS ADS。
+- `$LARES/.termio`（config/token/log）以及实际 config/log 文件是 deny 路径；工具不能读写，`search_files` 即使 `include_hidden` 也会跳过，workspace/额外根不能设在 deny 内。
 - 请求路径会先规范化（解析符号链接和 Windows 8.3 短名），再与 root 做组件级比较。
 - `os.Root` 在真正打开时再次阻止符号链接/junction 逃逸，避免 check-then-open 的 TOCTOU。
 - 搜索不跟随目录符号链接；`search_files` 只返回普通文件。

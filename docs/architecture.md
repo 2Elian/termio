@@ -33,7 +33,8 @@ v1 的目标是把这条链路做稳：注册、调用、进度、取消、超�
 ### `termio`（地端）
 
 - 读取配置，打开 workspace 和额外 allowed roots，构建工具注册表。
-- 工作区：默认 `~/LARES`，用户可在本地选择其他目录；工具默认在该工作区下工作，相对路径相对工作区解析。详见 [workspace.md](workspace.md)。
+- `$LARES` 是 app home，默认 `~/.lares`；端子信息（config、token、日志）在 `$LARES/.termio`，该目录被沙箱 deny，工具不可读写。
+- 工作区：默认 `$LARES`；用户可在本地选择其他目录；工具默认在该工作区下工作，相对路径相对工作区解析。详见 [workspace.md](workspace.md)。
 - 主动连接 `gateway_url`，发送 `termio/register`，上报设备信息和工具列表。
 - 维护心跳；断线后指数退避重连。
 - 收到 `tools/call` 后交给调度器；每个调用独立 goroutine，读循环不被阻塞。

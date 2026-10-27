@@ -15,7 +15,7 @@
 - Go 单二进制地端端子，Windows / macOS / Linux（amd64/arm64）
 - 反向 WebSocket + JSON-RPC 2.0 + MCP 工具形状
 - `search_files` / `read_file` / `system_info`，只读
-- 工作区：默认 `~/LARES`，用户本地切换；工具默认作用于工作区，支持相对路径
+- 工作区：默认 `~/.lares`，用户本地切换；工具默认作用于工作区，支持相对路径；端子信息在 `~/.lares/.termio` 且对工具 deny
 - `os.Root` 沙箱、绝对/相对路径、符号链接/junction 逃逸拦截
 - 心跳、重连、4003 取代冷却、并发限制、相对超时、取消、进度
 - `callId` 幂等缓存（10 分钟 / 1024 条）

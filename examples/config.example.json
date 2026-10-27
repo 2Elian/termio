@@ -3,10 +3,10 @@
   "device_id": "dev_replace_with_generated_id",
   "device_name": "my-laptop",
   "token": "replace-with-device-token",
-  "workspace": "/home/alice/LARES",
+  "workspace": "/home/alice/.lares",
   "allowed_roots": [],
   "max_concurrent_calls": 4,
   "call_timeout_ms": 30000,
   "log_level": "info",
-  "log_file": "/home/alice/.cache/termio/termio.log"
+  "log_file": "/home/alice/.lares/.termio/termio.log"
 }

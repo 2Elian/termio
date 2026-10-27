@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"termio/internal/config"
 )
 
 const darwinLabel = "com.termio.agent"
@@ -25,11 +27,10 @@ func (m *darwinManager) plistPath() (string, error) {
 }
 
 func (m *darwinManager) logPaths() (string, string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := config.AppDataDir()
 	if err != nil {
 		return "", "", err
 	}
-	dir := filepath.Join(home, "Library", "Logs", "termio")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", "", err
 	}

@@ -170,6 +170,42 @@ func TestSearchOutsideRoot(t *testing.T) {
 	}
 }
 
+func TestSearchSkipsDeniedAppData(t *testing.T) {
+	root := t.TempDir()
+	appData := filepath.Join(root, ".termio")
+	if err := os.MkdirAll(appData, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appData, "config.json"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "ok.txt"), []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := NewSandbox(root, nil, appData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sb.Close() })
+
+	tool := &SearchFiles{sandbox: sb}
+	raw, _ := json.Marshal(map[string]any{"pattern": "*", "include_hidden": true})
+	res, err := tool.Call(context.Background(), raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := matchPaths(res)
+	for _, path := range paths {
+		if strings.Contains(path, ".termio") {
+			t.Fatalf("search exposed app data: %v", paths)
+		}
+	}
+	want := filepath.Join(sb.Workspace(), "ok.txt")
+	if !equalStrings(paths, []string{want}) {
+		t.Fatalf("paths = %v, want [%s]", paths, want)
+	}
+}
+
 func TestSearchRelativePath(t *testing.T) {
 	root := writeSearchTree(t)
 	sb := newTestSandbox(t, root)

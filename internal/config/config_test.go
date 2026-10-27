@@ -203,6 +203,70 @@ func TestEffectiveRootsDedupes(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultMigratesLegacyConfig(t *testing.T) {
+	base := t.TempDir()
+	newHome := filepath.Join(base, "apphome")
+	t.Setenv("TERMIO_HOME", newHome)
+	t.Setenv("LARES_HOME", "")
+	if runtime.GOOS == "windows" {
+		t.Setenv("APPDATA", filepath.Join(base, "roaming"))
+		t.Setenv("LOCALAPPDATA", filepath.Join(base, "local"))
+	} else {
+		t.Setenv("HOME", base)
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "xdg-config"))
+		t.Setenv("XDG_CACHE_HOME", filepath.Join(base, "xdg-cache"))
+	}
+
+	legacyPath, err := LegacyDefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	legacyLog := LegacyDefaultLogPath()
+	cfg := &Config{
+		GatewayURL:         "ws://127.0.0.1:8787/ws",
+		DeviceID:           "dev_0123456789abcdef0123456789abcdef",
+		DeviceName:         "legacy",
+		Token:              "legacy-token",
+		Workspace:          workspace,
+		MaxConcurrentCalls: 4,
+		CallTimeoutMS:      30000,
+		LogLevel:           "info",
+		LogFile:            legacyLog,
+	}
+	if err := cfg.Save(legacyPath); err != nil {
+		t.Fatal(err)
+	}
+
+	got, newPath, migrated, err := LoadDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !migrated {
+		t.Fatal("expected migration")
+	}
+	wantPath, err := DefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newPath != wantPath {
+		t.Fatalf("new path = %q, want %q", newPath, wantPath)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("migrated config not written: %v", err)
+	}
+	wantWorkspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Workspace != wantWorkspace {
+		t.Fatalf("workspace = %q, want %q", got.Workspace, wantWorkspace)
+	}
+	if got.LogFile != DefaultLogPath() {
+		t.Fatalf("log file = %q, want %q", got.LogFile, DefaultLogPath())
+	}
+}
+
 func TestIsBroadWorkspace(t *testing.T) {
 	if home, err := os.UserHomeDir(); err == nil && !IsBroadWorkspace(home) {
 		t.Fatalf("home %q should be broad", home)
@@ -220,6 +284,8 @@ func TestIsBroadWorkspace(t *testing.T) {
 }
 
 func TestDefaultWorkspacePath(t *testing.T) {
+	t.Setenv("TERMIO_HOME", "")
+	t.Setenv("LARES_HOME", "")
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip("no home directory")
@@ -228,17 +294,50 @@ func TestDefaultWorkspacePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(home, DefaultWorkspaceDirName); got != want {
+	if want := filepath.Join(home, DefaultHomeDirName); got != want {
 		t.Fatalf("workspace = %q, want %q", got, want)
 	}
 }
 
-func TestNewDefaultUsesLARES(t *testing.T) {
+func TestDefaultLocationsUseAppHome(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "custom-lares")
+	t.Setenv("TERMIO_HOME", custom)
+	t.Setenv("LARES_HOME", "")
+
+	home, err := AppHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if home != filepath.Clean(custom) {
+		t.Fatalf("AppHome = %q, want %q", home, filepath.Clean(custom))
+	}
+	data, err := AppDataDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, AppDataDirName); data != want {
+		t.Fatalf("AppDataDir = %q, want %q", data, want)
+	}
+	path, err := DefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(data, "config.json"); path != want {
+		t.Fatalf("DefaultPath = %q, want %q", path, want)
+	}
+	if got, want := DefaultLogPath(), filepath.Join(data, "termio.log"); got != want {
+		t.Fatalf("DefaultLogPath = %q, want %q", got, want)
+	}
+}
+
+func TestNewDefaultUsesAppHome(t *testing.T) {
+	t.Setenv("TERMIO_HOME", "")
+	t.Setenv("LARES_HOME", "")
 	cfg, err := NewDefault()
 	if err != nil {
 		t.Skipf("cannot build default config: %v", err)
 	}
-	if filepath.Base(cfg.Workspace) != DefaultWorkspaceDirName {
+	if filepath.Base(cfg.Workspace) != DefaultHomeDirName {
 		t.Fatalf("workspace = %q", cfg.Workspace)
 	}
 	if len(cfg.AllowedRoots) != 0 {

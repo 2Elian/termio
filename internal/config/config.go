@@ -23,7 +23,8 @@ const (
 	MinCallTimeoutMS        = 1000
 	MaxCallTimeoutMS        = 300000
 	MaxConcurrentCallsLimit = 32
-	DefaultWorkspaceDirName = "LARES"
+	DefaultHomeDirName      = ".lares"
+	AppDataDirName          = ".termio"
 )
 
 // Config is the on-disk daemon configuration.
@@ -40,17 +41,64 @@ type Config struct {
 	LogFile            string   `json:"log_file"`
 }
 
-// DefaultWorkspacePath returns ~/LARES (or %USERPROFILE%\LARES).
-func DefaultWorkspacePath() (string, error) {
+// AppHome returns the per-user Termio home. It defaults to ~/.lares and can
+// be overridden with TERMIO_HOME or LARES_HOME.
+func AppHome() (string, error) {
+	for _, key := range []string{"TERMIO_HOME", "LARES_HOME"} {
+		if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
+			expanded, err := ExpandHome(raw)
+			if err != nil {
+				return "", err
+			}
+			abs, err := filepath.Abs(expanded)
+			if err != nil {
+				return "", fmt.Errorf("%s: %w", key, err)
+			}
+			return filepath.Clean(abs), nil
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("locate home directory: %w", err)
 	}
-	return filepath.Join(home, DefaultWorkspaceDirName), nil
+	return filepath.Join(home, DefaultHomeDirName), nil
 }
 
-// DefaultPath returns the per-user config path.
+// AppDataDir returns the directory for terminal metadata (config, logs).
+// It is always inside the app home, even when the workspace is elsewhere.
+func AppDataDir() (string, error) {
+	home, err := AppHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, AppDataDirName), nil
+}
+
+// DefaultWorkspacePath returns the default workspace: the app home.
+func DefaultWorkspacePath() (string, error) {
+	return AppHome()
+}
+
+// DefaultPath returns the config path inside the app data directory.
 func DefaultPath() (string, error) {
+	dir, err := AppDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.json"), nil
+}
+
+// DefaultLogPath returns the log path inside the app data directory.
+func DefaultLogPath() string {
+	dir, err := AppDataDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "termio.log")
+}
+
+// LegacyDefaultPath is the pre-workspace config location.
+func LegacyDefaultPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("locate user config dir: %w", err)
@@ -58,8 +106,8 @@ func DefaultPath() (string, error) {
 	return filepath.Join(dir, "termio", "config.json"), nil
 }
 
-// DefaultLogPath returns the per-user log path.
-func DefaultLogPath() string {
+// LegacyDefaultLogPath is the pre-workspace log location.
+func LegacyDefaultLogPath() string {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		return ""
@@ -67,7 +115,7 @@ func DefaultLogPath() string {
 	return filepath.Join(dir, "termio", "termio.log")
 }
 
-// NewDefault builds a config with a fresh device ID, the default LARES
+// NewDefault builds a config with a fresh device ID, the default app home
 // workspace, no extra roots, and the loopback development gateway URL.
 // It does not create the workspace directory; callers that initialize a new
 // install do that.
@@ -162,6 +210,43 @@ func (c *Config) migrateWorkspace() error {
 	}
 	c.AllowedRoots = DedupeRoots(c.Workspace, roots)
 	return nil
+}
+
+// LoadDefault loads the new default config, migrating the legacy
+// UserConfigDir location when the new path does not exist yet. The bool
+// reports whether a migration was performed.
+func LoadDefault() (*Config, string, bool, error) {
+	path, err := DefaultPath()
+	if err != nil {
+		return nil, "", false, err
+	}
+	if _, err := os.Stat(path); err == nil {
+		cfg, err := Load(path)
+		return cfg, path, false, err
+	} else if !os.IsNotExist(err) {
+		return nil, path, false, err
+	}
+
+	legacy, legacyErr := LegacyDefaultPath()
+	if legacyErr == nil {
+		if _, err := os.Stat(legacy); err == nil {
+			cfg, err := Load(legacy)
+			if err != nil {
+				return nil, path, false, err
+			}
+			legacyLog := LegacyDefaultLogPath()
+			if cfg.LogFile == "" || (legacyLog != "" && samePath(cfg.LogFile, legacyLog)) {
+				cfg.LogFile = DefaultLogPath()
+			}
+			if err := cfg.Save(path); err != nil {
+				return nil, path, false, err
+			}
+			return cfg, path, true, nil
+		} else if !os.IsNotExist(err) {
+			return nil, path, false, err
+		}
+	}
+	return nil, path, false, fmt.Errorf("config not found at %s; run termio init", path)
 }
 
 func (c *Config) applyDefaults() {
@@ -360,7 +445,7 @@ func (c *Config) EffectiveRoots() []string {
 	return out
 }
 
-// IsDefaultWorkspace reports whether the config uses the default ~/LARES path.
+// IsDefaultWorkspace reports whether the config uses the default app home.
 func (c *Config) IsDefaultWorkspace() bool {
 	def, err := DefaultWorkspacePath()
 	if err != nil {

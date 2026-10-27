@@ -3,7 +3,7 @@
 | 文档 | 内容 |
 |---|---|
 | [architecture.md](architecture.md) | 组件、连接生命周期、部署拓扑、多租户、UI 选型、可靠性 |
-| [workspace.md](workspace.md) | 工作区（默认 `~/LARES`、本地切换、路径规则、安全边界） |
+| [workspace.md](workspace.md) | 工作区（默认 `~/.lares`、本地切换、路径规则、安全边界） |
 | [roadmap.md](roadmap.md) | V1.x / V2 / V3 的优先顺序、验收标准与传输演进决策 |
 | [protocol.md](protocol.md) | WebSocket / JSON-RPC 协议、HTTP API、错误码、幂等与超时 |
 | [tools.md](tools.md) | 内置工具参考、沙箱细节、**新增工具（二开）教程** |
