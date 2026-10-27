@@ -1,0 +1,12 @@
+/bin/
+/dist/
+/tmp/
+/.debug/
+*.log
+.DS_Store
+.idea/
+.env
+/devices.json
+/devices.local.json
+*.postman_environment.json
+coverage.out

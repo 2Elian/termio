@@ -1,0 +1,364 @@
+{
+  "info": {
+    "name": "Termio API",
+    "description": "HTTP collection for the Termio reference gateway. Run 'List devices' first: its test script stores the first device id in the deviceId variable. For a fake-device WebSocket walkthrough, see docs/debugging.md.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8787"
+    },
+    {
+      "key": "token",
+      "value": "dev-token"
+    },
+    {
+      "key": "deviceId",
+      "value": "dev_debug"
+    },
+    {
+      "key": "readPath",
+      "value": "E:/Project/Termio/go.mod"
+    },
+    {
+      "key": "outsidePath",
+      "value": "C:/Windows/win.ini"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/healthz"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "List devices (run first)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": "{{baseUrl}}/v1/devices"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "const body = pm.response.json();",
+              "pm.test('at least one device is online', function () {",
+              "  pm.expect(body.devices).to.be.an('array').that.is.not.empty;",
+              "});",
+              "if (body.devices && body.devices.length > 0) {",
+              "  pm.collectionVariables.set('deviceId', body.devices[0].id);",
+              "  console.log('deviceId set to', body.devices[0].id);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "List tools",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": "{{baseUrl}}/v1/devices/{{deviceId}}/tools"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Search files",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"search_files\",\n  \"arguments\": {\n    \"pattern\": \"*.go\",\n    \"max_results\": 20\n  },\n  \"timeout_ms\": 30000,\n  \"call_id\": \"postman-search-1\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/v1/devices/{{deviceId}}/tools/call"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "const body = pm.response.json();",
+              "pm.test('tool did not fail', function () { pm.expect(body.isError).to.not.equal(true); });",
+              "pm.test('has structuredContent', function () { pm.expect(body.structuredContent).to.be.an('object'); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Read file",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"read_file\",\n  \"arguments\": {\n    \"path\": \"{{readPath}}\",\n    \"max_bytes\": 4096\n  },\n  \"timeout_ms\": 30000\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/v1/devices/{{deviceId}}/tools/call"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "const body = pm.response.json();",
+              "pm.test('tool did not fail', function () { pm.expect(body.isError).to.not.equal(true); });",
+              "pm.test('content is a text block', function () { pm.expect(body.content[0].type).to.eql('text'); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "System info",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"system_info\",\n  \"arguments\": {}\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/v1/devices/{{deviceId}}/tools/call"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "const body = pm.response.json();",
+              "pm.test('has allowed roots', function () {",
+              "  pm.expect(body.structuredContent.allowed_roots).to.be.an('array');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Duplicate call_id (run twice)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"search_files\",\n  \"arguments\": {\n    \"pattern\": \"*.md\",\n    \"max_results\": 5\n  },\n  \"timeout_ms\": 30000,\n  \"call_id\": \"postman-dup-1\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/v1/devices/{{deviceId}}/tools/call"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "pm.test('same call_id is replayed', function () { pm.expect(pm.response.json().isError).to.not.equal(true); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Outside allowed root (expect isError)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"read_file\",\n  \"arguments\": {\n    \"path\": \"{{outsidePath}}\"\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/v1/devices/{{deviceId}}/tools/call"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "const body = pm.response.json();",
+              "pm.test('tool reports isError', function () { pm.expect(body.isError).to.eql(true); });",
+              "pm.test('error text explains the sandbox', function () {",
+              "  pm.expect(body.content[0].text.toLowerCase()).to.include('allowed roots');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Unknown tool (expect 400)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"does_not_exist\",\n  \"arguments\": {}\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/v1/devices/{{deviceId}}/tools/call"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 400', function () { pm.response.to.have.status(400); });",
+              "pm.test('error code is -32602', function () { pm.expect(pm.response.json().error.code).to.eql(-32602); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Missing auth (expect 401)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/v1/devices"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 401', function () { pm.response.to.have.status(401); });"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

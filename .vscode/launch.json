@@ -1,0 +1,57 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Termio Gateway",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/termio-gateway",
+      "args": [
+        "--addr", "127.0.0.1:8787",
+        "--token", "dev-token",
+        "--log-level", "debug"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Termio Daemon",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/termio",
+      "args": [
+        "run",
+        "--config", "${workspaceFolder}/.debug/config.json"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "termio: prepare debug config",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Termio Daemon (no init)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/termio",
+      "args": [
+        "run",
+        "--config", "${workspaceFolder}/.debug/config.json"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Termio: Gateway + Daemon",
+      "configurations": [
+        "Termio Gateway",
+        "Termio Daemon (no init)"
+      ],
+      "preLaunchTask": "termio: prepare debug config",
+      "stopAll": true
+    }
+  ]
+}

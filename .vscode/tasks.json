@@ -1,0 +1,51 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "termio: prepare debug config",
+      "type": "process",
+      "command": "go",
+      "args": [
+        "run", "./cmd/termio", "init",
+        "--config", "${workspaceFolder}/.debug/config.json",
+        "--url", "ws://127.0.0.1:8787/ws",
+        "--token", "dev-token",
+        "--device-id", "dev_debug",
+        "--device-name", "debug-device",
+        "--workspace", "${workspaceFolder}",
+        "--log-file", "${workspaceFolder}/.debug/termio.log",
+        "--log-level", "debug",
+        "--force"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared",
+        "clear": true
+      }
+    },
+    {
+      "label": "termio: test",
+      "type": "process",
+      "command": "go",
+      "args": ["test", "-count=1", "./..."],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "termio: build",
+      "type": "process",
+      "command": "go",
+      "args": ["build", "./..."],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
