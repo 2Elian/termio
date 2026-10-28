@@ -197,7 +197,7 @@ def call_tool(name, arguments, timeout_ms=30000, call_id=None,
 
 完整教程（含主动推消息、接消息、进度、超时/取消的原始帧）：[docs/debugging.md](docs/debugging.md)。
 
-想按“从进程启动到一条消息返回”的顺序逐点调试，看 [docs/debug-full-chain.md](docs/debug-full-chain.md)：每个功能点对应哪些文件/函数、在哪里下断点、如何验证多工作区与会话并发。
+想按“从进程启动到一条消息返回”的顺序逐点调试，看 [docs/debug-full-chain.md](docs/debug-full-chain.md)：每个功能点对应哪些文件/函数、在哪里下断点、如何验证多工作区与会话并发。精确行号、条件断点和每个分支的触发方式在 [docs/breakpoints.md](docs/breakpoints.md)。
 
 ## 文档
 
@@ -213,6 +213,7 @@ def call_tool(name, arguments, timeout_ms=30000, call_id=None,
 | [docs/cloud-agent-integration.md](docs/cloud-agent-integration.md) | 云端 Agent 接入细节 |
 | [docs/debugging.md](docs/debugging.md) | VS Code 断点调试 + Postman/WebSocket 联调 |
 | [docs/debug-full-chain.md](docs/debug-full-chain.md) | **全链路调试**：启动 → 注册 → 消息 → 工作区路由 → 工具 → 响应，逐功能点代码路径与断点 |
+| [docs/breakpoints.md](docs/breakpoints.md) | **断点全表**：VS Code 条件断点/Logpoint、精确行号、每个分支触发方式、死角审计 |
 | [docs/self-test.md](docs/self-test.md) | 用 termioctl 在终端输入 JSON 自测；Postman 用法 |
 
 ## 当前状态

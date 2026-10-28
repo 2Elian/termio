@@ -159,8 +159,9 @@ printf '%s\n%s\n' \
 
 1. 设置 `baseUrl` = `http://127.0.0.1:8787`，`token` = 网关 token。
 2. 先跑 **List devices (run first)**，测试脚本会自动写入 `deviceId`、默认 `workspaceId`，并在有第二个工作区时写入 `otherWorkspaceId`。
-3. 跑 **List workspaces** 查看全部已注册工作区。
-4. 依次跑 Search files / Read file / System info / Workspace call / Unknown workspace / Outside allowed root / Unknown tool / Missing auth。
+3. 跑 **Refresh tools** 触发一次真实 `tools/list`。
+4. 跑 **List workspaces** 查看全部已注册工作区。
+5. 依次跑 Search files / Read file / System info / Workspace call / Unknown workspace / Outside allowed root / Unknown tool / Missing auth。
 
 Postman 也可以扮演假设备，手动接收网关推送的 `tools/call` 并回复：
 

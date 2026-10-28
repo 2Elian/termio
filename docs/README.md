@@ -12,6 +12,7 @@
 | [cloud-agent-integration.md](cloud-agent-integration.md) | 把 Termio 接入自己的云端 Agent |
 | [debugging.md](debugging.md) | VS Code 断点调试、Postman/WebSocket 手动推消息教程 |
 | [debug-full-chain.md](debug-full-chain.md) | 全链路调试：启动 → 注册 → 消息 → 工作区路由 → 工具 → 响应，逐功能点断点与测试矩阵 |
+| [breakpoints.md](breakpoints.md) | **断点全表**：VS Code 条件断点/Logpoint、精确行号、每个分支的触发方式、死角审计 |
 | [self-test.md](self-test.md) | 启动后用 termioctl 输入 JSON 自测；Postman 集合用法 |
 | [postman/termio.postman_collection.json](postman/termio.postman_collection.json) | 可直接导入的 Postman HTTP 集合 |
 

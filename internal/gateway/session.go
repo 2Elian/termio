@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -76,6 +77,7 @@ type deviceSnapshot struct {
 	Tools              []protocol.ToolSpec      `json:"tools"`
 	Workspaces         []protocol.WorkspaceInfo `json:"workspaces"`
 	DefaultWorkspaceID string                   `json:"default_workspace_id,omitempty"`
+	MaxInflight        int                      `json:"max_inflight"`
 }
 
 type deviceConn struct {
@@ -129,6 +131,10 @@ func (d *deviceConn) hasWorkspace(id string) bool {
 }
 
 func (d *deviceConn) snapshot() deviceSnapshot {
+	d.mu.Lock()
+	tools := append([]protocol.ToolSpec(nil), d.tools...)
+	maxInflight := d.maxInflight
+	d.mu.Unlock()
 	return deviceSnapshot{
 		ID:                 d.id,
 		Name:               d.info.Name,
@@ -136,10 +142,36 @@ func (d *deviceConn) snapshot() deviceSnapshot {
 		Arch:               d.info.Arch,
 		Version:            d.info.Version,
 		ConnectedAt:        d.connectedAt,
-		Tools:              d.tools,
+		Tools:              tools,
 		Workspaces:         d.workspaces,
 		DefaultWorkspaceID: d.defaultWorkspaceID,
+		MaxInflight:        maxInflight,
 	}
+}
+
+// refreshTools asks the daemon for its current tools/list and updates the
+// cached snapshot. The reference gateway otherwise uses the registration-time
+// list; this is the live path for the daemon's tools/list handler.
+func (d *deviceConn) refreshTools(ctx context.Context) error {
+	req, err := protocol.NewRequest(protocol.NewID("g_"), protocol.MethodToolsList, struct{}{})
+	if err != nil {
+		return err
+	}
+	resp, err := d.request(ctx, req)
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("tools/list failed (%d): %s", resp.Error.Code, resp.Error.Message)
+	}
+	var result protocol.ToolsListResult
+	if err := protocol.DecodeResult(resp, &result); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	d.tools = append([]protocol.ToolSpec(nil), result.Tools...)
+	d.mu.Unlock()
+	return nil
 }
 
 func (d *deviceConn) request(ctx context.Context, msg *protocol.Message) (*protocol.Message, error) {

@@ -383,7 +383,8 @@ sequenceDiagram
         {"id": "ws_default", "name": "default"},
         {"id": "ws_docs", "name": "docs"}
       ],
-      "default_workspace_id": "ws_default"
+      "default_workspace_id": "ws_default",
+      "max_inflight": 4
     }
   ]
 }
@@ -393,7 +394,10 @@ sequenceDiagram
 
 ### `GET /v1/devices/{id}/tools`
 
-返回该设备的工具列表。设备不在线返回 404。
+返回该设备的工具列表和注册的 `max_inflight`。设备不在线返回 404。
+
+- 默认返回注册时缓存的列表。
+- `?refresh=1`（或 `?refresh=true`）会让网关向地端发送 `tools/list`，用最新结果刷新缓存后返回；这也会实际走到 daemon 的 `tools/list` 处理路径。
 
 ### `GET /v1/devices/{id}/workspaces`
 

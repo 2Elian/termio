@@ -583,6 +583,36 @@ func TestE2EWorkspacesExecuteConcurrently(t *testing.T) {
 	}
 }
 
+func TestE2EToolsRefreshUsesDaemonToolsList(t *testing.T) {
+	root := t.TempDir()
+	env := startE2E(t, newTestRegistry(t, root), 5000, root)
+
+	req, _ := http.NewRequest(http.MethodGet, env.baseURL+"/v1/devices/"+env.deviceID+"/tools?refresh=1", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, raw)
+	}
+	var body struct {
+		Tools       []protocol.ToolSpec `json:"tools"`
+		MaxInflight int                 `json:"max_inflight"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Tools) != 3 {
+		t.Fatalf("tools = %+v", body.Tools)
+	}
+	if body.MaxInflight != 4 {
+		t.Fatalf("max_inflight = %d, want 4", body.MaxInflight)
+	}
+}
+
 func TestE2EWorkspacesEndpoint(t *testing.T) {
 	rootA := t.TempDir()
 	rootB := t.TempDir()

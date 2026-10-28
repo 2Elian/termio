@@ -122,6 +122,33 @@
       ]
     },
     {
+      "name": "Refresh tools (calls tools/list)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": "{{baseUrl}}/v1/devices/{{deviceId}}/tools?refresh=1"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "const body = pm.response.json();",
+              "pm.test('has tools', function () { pm.expect(body.tools).to.be.an('array').that.is.not.empty; });",
+              "pm.test('has max_inflight', function () { pm.expect(body.max_inflight).to.be.a('number'); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
       "name": "List workspaces",
       "request": {
         "method": "GET",

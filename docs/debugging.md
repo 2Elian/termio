@@ -147,6 +147,7 @@ go run ./cmd/termio-gateway --addr 127.0.0.1:8787 --token dev-token --log-level 
 
 然后依次试：
 
+- **Refresh tools**：`GET /tools?refresh=1`，触发真实 `tools/list` 并刷新缓存
 - **Search files**：`search_files`，搜索 `*.go`
 - **Read file**：`read_file`，读取工作区里的 `go.mod`
 - **System info**：`system_info`

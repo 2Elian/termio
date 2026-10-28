@@ -137,9 +137,26 @@ func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, protocol.CodeDeviceOffline, "device is not connected")
 		return
 	}
+	if refresh := r.URL.Query().Get("refresh"); refresh == "1" || strings.EqualFold(refresh, "true") {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := dc.refreshTools(ctx); err != nil {
+			switch {
+			case errors.Is(err, context.DeadlineExceeded):
+				writeError(w, http.StatusGatewayTimeout, protocol.CodeRequestTimeout, "device did not answer tools/list before the deadline")
+			case errors.Is(err, errDeviceClosed):
+				writeError(w, http.StatusBadGateway, protocol.CodeDeviceOffline, "device disconnected")
+			default:
+				writeError(w, http.StatusBadGateway, protocol.CodeInternalError, err.Error())
+			}
+			return
+		}
+	}
+	snap := dc.snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"device_id": deviceID,
-		"tools":     dc.snapshot().Tools,
+		"device_id":    deviceID,
+		"tools":        snap.Tools,
+		"max_inflight": snap.MaxInflight,
 	})
 }
 

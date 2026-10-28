@@ -7,7 +7,7 @@
 - 多工作区、多会话、并发、幂等、超时、取消分别怎么验证；
 - 哪些行为有自动化测试覆盖，哪些需要手工观察。
 
-> 只想快速跑通，先看 [self-test.md](self-test.md)；想看 Postman 假设备/原始帧，看 [debugging.md](debugging.md)。本文是“逐点调试手册”。
+> 只想快速跑通，先看 [self-test.md](self-test.md)；想看 Postman 假设备/原始帧，看 [debugging.md](debugging.md)。需要**精确到行号、条件断点、每个分支怎么触发**，看 [breakpoints.md](breakpoints.md)。
 
 ---
 
