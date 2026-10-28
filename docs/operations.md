@@ -61,7 +61,7 @@ export TERMIO_HOME="$HOME/.lares"
 
 默认工作区不存在时由 `termio init` 创建。端子信息目录 `.termio` 永远不对工具开放（即使默认工作区就是 `$LARES`，工具也无法读取其中的 config/token/log）。
 
-> **从旧版本升级**：如果新路径不存在、但旧的 `UserConfigDir/termio/config.json`（Windows `%AppData%\termio\config.json`）存在，首次 `run` / `install` / `workspace` 会自动迁移到 `$LARES/.termio/config.json`；旧配置的第一个 `allowed_roots` 变成 workspace，旧的默认日志路径会改成新默认日志。旧文件保留不删。
+> **从旧版本升级**：如果新路径不存在、但旧的 `UserConfigDir/termio/config.json`（Windows `%AppData%\termio\config.json`）存在，首次 `run` / `install` / `workspace` 会自动迁移到 `$LARES/.termio/config.json`；旧的单 `workspace` 变成 `workspaces[0]`（ID `ws_default`），旧 `allowed_roots` 变成它的 `extra_roots`；旧的默认日志路径会改成新默认日志。旧文件保留不删。
 
 完整示例：
 
@@ -71,8 +71,21 @@ export TERMIO_HOME="$HOME/.lares"
   "device_id": "dev_0e59845886b548db6f5dcaf4df7d818a",
   "device_name": "my-laptop",
   "token": "device-token",
-  "workspace": "C:\\Users\\alice\\.lares",
-  "allowed_roots": [],
+  "workspaces": [
+    {
+      "id": "ws_default",
+      "name": "default",
+      "path": "C:\\Users\\alice\\.lares",
+      "extra_roots": []
+    },
+    {
+      "id": "ws_docs",
+      "name": "docs",
+      "path": "C:\\Users\\alice\\projects\\acme-docs",
+      "extra_roots": ["C:\\Users\\alice\\shared"]
+    }
+  ],
+  "default_workspace_id": "ws_default",
   "max_concurrent_calls": 4,
   "call_timeout_ms": 30000,
   "log_level": "info",
@@ -86,14 +99,16 @@ export TERMIO_HOME="$HOME/.lares"
 | `device_id` | 是 | 1–128 个字母/数字/`.`/`-`/`_`；`init` 自动生成 |
 | `device_name` | 否 | 展示名，默认主机名 |
 | `token` | 是 | 设备或共享 Bearer token |
-| `workspace` | 是 | 默认工作目录；默认 `~/.lares`；必须存在且是目录 |
-| `allowed_roots` | 否 | **额外**允许目录；绝对路径；不要放 workspace 的副本 |
-| `max_concurrent_calls` | 否 | 1–32，默认 4 |
+| `workspaces` | 是 | 工作区数组；每项含 `id`、`name?`、`path`、`extra_roots?`；至少一个 |
+| `workspaces[].path` | 是 | 本地绝对路径；必须存在且是目录；不会上报云端 |
+| `workspaces[].extra_roots` | 否 | 该工作区的额外允许目录 |
+| `default_workspace_id` | 否 | 调用省略 `workspaceId` 时使用；省略则取 `workspaces[0]`；必须存在 |
+| `max_concurrent_calls` | 否 | **每个工作区** 1–32，默认 4 |
 | `call_timeout_ms` | 否 | 1000–300000，默认 30000 |
 | `log_level` | 否 | `debug` / `info` / `warn` / `error` |
 | `log_file` | 否 | 绝对路径；默认 `$LARES/.termio/termio.log` |
 
-> 工作区语义、相对路径和迁移规则见 [workspace.md](workspace.md)。`workspace` 由本地用户选择，云端不能更改。
+> 工作区语义、相对路径和迁移规则见 [workspace.md](workspace.md)。工作区由本地用户注册，云端只能在已注册 ID 中选择。
 
 配置按严格模式解析，未知字段会报错。Unix 文件权限 0600。
 
@@ -102,7 +117,11 @@ export TERMIO_HOME="$HOME/.lares"
 ```bash
 termio init --token <token> [--workspace <dir>] [--root <extra-dir>]... [--url <ws-url>] [--log-file <path>] [--log-level <level>] [--config <path>]
 termio run [--config <path>]
-termio workspace show [--config <path>]
+termio workspace list [--config <path>]
+termio workspace show [--config <path>] [workspace-id]
+termio workspace add [--config <path>] [--id <id>] [--name <name>] [--root <dir>]... <directory>
+termio workspace remove [--config <path>] <workspace-id>
+termio workspace default [--config <path>] <workspace-id>
 termio workspace set [--config <path>] <directory>
 termio workspace reset [--config <path>]
 termio install [--config <path>]
@@ -145,13 +164,29 @@ Windows PowerShell：
 - `--root` 是额外根，可重复；不要用 `C:\`、`/` 或整个 home 作为 workspace，除非你明确接受这个暴露面。
 - 只传 `--root`、不传 `--workspace` 时，第一个 root 作为工作区，其余作为额外根（兼容旧脚本）。
 
-查看/切换工作区（切换后需重启 daemon）：
+管理多个工作区：
 
 ```bash
-termio workspace show
+# 查看注册表；* 表示默认
+termio workspace list
+termio workspace show ws_docs
+
+# 注册/删除；删除只删注册，不删磁盘文件
+termio workspace add --id ws_docs --name docs "$HOME/projects/docs"
+termio workspace remove ws_docs
+
+# 默认工作区（影响省略 workspace_id 的调用）
+termio workspace default ws_default
+
+# 兼容旧命令
 termio workspace set "$HOME/projects/other"
 termio workspace reset
 ```
+
+- **切换已注册工作区不需要重启**：云端直接传不同的 `workspace_id`。
+- **新增/删除工作区需要重启 daemon**：daemon 启动时打开沙箱，网关缓存注册列表。
+- 一个工作区可被多个会话/任务共享；会话数量不受限制（受内存与并发额度约束）。
+- `max_concurrent_calls` 是每工作区的并发上限，不是整台设备的全局上限。
 
 ### 前台运行
 
@@ -275,10 +310,11 @@ E2E 覆盖：注册、搜索/读取、越界拒绝、未知工具、重复 callI
 | 反复重连 / 4002 | 协议版本不匹配；升级网关和地端到同一版本 |
 | 反复 4003 | 同一 device_id 有两个进程；停掉旧进程，或更换 device_id；冷却 5 分钟 |
 | 调用超时 | 工具是否忽略 ctx；`call_timeout_ms` 是否太小；大目录搜索是否超过预算 |
-| `path is outside the allowed roots` | 绝对路径不在 workspace/额外根内；或路径被符号链接解析到边界外 |
+| `path is outside the allowed roots` | 绝对路径不在所选工作区/额外根内；或路径被符号链接解析到边界外；确认调用的 `workspace_id` |
 | `relative path escapes the workspace` | 相对路径用了 `..` 跳出工作区；改用绝对路径并指向额外根，或调整工作区 |
-| 工作区不存在/不可读 | `termio workspace show` 检查；`termio workspace set <已存在目录>` 或 `workspace reset`；重启 daemon |
-| 权限拒绝 | macOS Full Disk Access；Windows Controlled Folder Access/AV；Linux ACL/SELinux；确认 workspace/root 可读 |
+| `unknown workspace` / `-32012` | 云端传了未注册的 ID；`termio workspace list` 检查；新增后重启 daemon |
+| 工作区不存在/不可读 | `termio workspace show <id>` 检查；修复目录后重启 daemon；不会静默回退 |
+| 权限拒绝 | macOS Full Disk Access；Windows Controlled Folder Access/AV；Linux ACL/SELinux；确认所选 workspace/root 可读 |
 | `plaintext ws:// is only allowed for loopback` | 远程网关必须用 `wss://` |
 | 端口占用 | 换 `--addr`，或停掉旧网关 |
 | Windows 登录时闪窗口 | 使用 `termio-agent.exe` 自启动 |

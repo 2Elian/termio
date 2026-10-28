@@ -8,7 +8,8 @@
 - Go 单静态二进制，Windows / macOS / Linux（amd64 / arm64）
 - 工具方法/结果遵循 MCP 形状，接入现有 Agent 框架成本低
 - 只读工具 + `os.Root` 沙箱 + 每设备 token，默认最小权限
-- 默认在 `~/.lares` 工作区下工作；端子信息在 `~/.lares/.termio`（工具不可读写）；用户可本地切换，云端不能更改
+- 支持多个本地工作区：一个工作区可服务多个会话/任务，不同工作区可并发执行；切换已注册工作区无需重启
+- 默认在 `~/.lares` 工作区下工作；端子信息在 `~/.lares/.termio`（工具不可读写）；工作区只能由本地用户配置
 - 自带单实例参考网关，开箱即可端到端联调
 
 ## 背景与问题
@@ -47,23 +48,25 @@ MQTT 仍是 Termio 的合理备选（尤其是离线队列/海量弱网设备）
 ┌───────────────────────────────────▼───────────────────────────┐
 │  地端 termio daemon                                            │
 │    ├─ 用户级自启动 / 配置 / 日志                               │
-│    ├─ os.Root 沙箱（allowed roots）                            │
+│    ├─ 工作区注册表（默认 + 多个本地授权目录）                  │
+│    ├─ 每工作区 os.Root 沙箱 + 工具注册表                       │
 │    ├─ search_files / read_file / system_info                   │
-│    └─ 并发、超时、取消、进度、callId 幂等缓存                  │
+│    └─ 并发、超时、取消、进度、按(工作区,会话,callId)幂等缓存   │
 └────────────────────────────────────────────────────────────────┘
 ```
 
 一次调用：
 
 1. 云端 Agent 的 tool stub 发 `POST /v1/devices/{id}/tools/call`。
-2. 网关把请求编码成 `tools/call`，通过该设备持有的 WebSocket 推下去。
-3. 地端在沙箱内执行工具，回传 progress 和最终结果。
-4. 网关把结果作为 HTTP 响应返回给云端 Agent。
+2. 网关把请求编码成 `tools/call`，填入设备默认工作区（或使用调用指定的 `workspace_id`），通过该设备持有的 WebSocket 推下去。
+3. 地端按 `workspace_id` 选择沙箱和工具注册表，在对应工作区内执行工具，回传 progress 和最终结果。
+4. 网关把结果作为 HTTP 响应返回给云端 Agent；结果 `_meta` 带回工作区和会话 ID。
 
 **多租户隔离点**：
 
 - 网关按 `device_id` 路由；每台设备可有独立 token。
-- 地端只打开自己的 `workspace` 和额外 `allowed_roots`，工具无法越出。
+- 地端为每个已注册工作区打开独立沙箱；一次调用只能落在其中一个，云端无法指定任意路径。
+- 一个工作区可服务多个会话/任务；幂等缓存按 `(workspace, session, callId)` 隔离，工作区之间可并发。
 - 地端只注册只读工具；没有 shell、写文件、删除或进程管理。
 - 云端 Agent 按租户上下文选择设备，模型不能自由指定任意 device_id。
 
@@ -76,6 +79,7 @@ v1 的 `termio-gateway` 是单实例参考实现：内存态、静态设备表�
 - **逐跳 id + 端到端 callId**：JSON-RPC `id` 只在本连接内配对；`_meta.termio/callId` 跨重连/重试保持幂等，地端缓存 10 分钟。
 - **相对超时**：`_meta.termio/timeoutMs` 避免云端/地端时钟偏差；网关多等 2 秒让地端超时结果先赢。
 - **可靠连接**：双向心跳、指数退避重连、4003 取代冷却、并发上限、过载快速失败。
+- **多工作区路由**：`workspace_id` 选择本地授权目录；一个工作区多个会话，工作区之间独立沙箱与并发额度；热切换不需要重启。
 - **`os.Root` 沙箱**：workspace + 额外根、绝对/相对路径、符号链接/junction 逃逸拦截、UNC/ADS 拒绝；不是简单的字符串前缀检查。
 - **用户级自启动**：Linux systemd user / macOS LaunchAgent / Windows 计划任务；避免 LocalSystem/root 读不到用户文件。
 - **单静态二进制**：除 `coder/websocket` 外只用标准库；三端交叉编译简单。
@@ -99,11 +103,15 @@ go build -o bin/termioctl ./cmd/termioctl
 ./bin/termio-gateway --addr 127.0.0.1:8787 --token dev-token
 ```
 
-初始化并运行地端（root 换成你想允许的目录）：
+初始化并运行地端（workspace 换成你想允许的目录）：
 
 ```bash
 ./bin/termio init --token dev-token --workspace "$PWD"
 ./bin/termio run
+
+# 可选：再注册一个本地工作区；重启 daemon 后生效
+./bin/termio workspace add --id ws_docs --name docs "$HOME/docs"
+./bin/termio workspace list
 ```
 
 终端 JSON 自测（启动后另开一个终端）：
@@ -143,10 +151,15 @@ GATEWAY = "https://gateway.example.com"
 DEVICE_ID = "dev_..."
 TOKEN = "cloud-or-device-token"
 
-def call_tool(name, arguments, timeout_ms=30000, call_id=None):
+def call_tool(name, arguments, timeout_ms=30000, call_id=None,
+              workspace_id=None, session_id=None):
     body = {"name": name, "arguments": arguments, "timeout_ms": timeout_ms}
     if call_id:
         body["call_id"] = call_id
+    if workspace_id:
+        body["workspace_id"] = workspace_id
+    if session_id:
+        body["session_id"] = session_id
     req = urllib.request.Request(
         f"{GATEWAY}/v1/devices/{DEVICE_ID}/tools/call",
         data=json.dumps(body).encode(),
@@ -165,10 +178,11 @@ def call_tool(name, arguments, timeout_ms=30000, call_id=None):
 
 要点：
 
-- 重试复用同一个 `call_id`；地端会重放已完成结果。
+- 重试复用同一个 `call_id`；地端会在同一 `(workspace_id, session_id)` 下重放已完成结果。
 - `isError: true` 是工具失败，不是网络失败；把错误文本交给模型决策。
 - 设备 ID 从租户上下文解析，不要交给 LLM 自由选择。
-- 工具列表可通过 `GET /v1/devices/{id}/tools` 动态发现，映射到 Agent 框架的 tool schema。
+- 会话/任务绑定一个 `workspace_id`；同一工作区可以有多个 `session_id`，工作区之间可并发。
+- 工具列表可通过 `GET /v1/devices/{id}/tools` 发现；工作区列表通过 `GET /v1/devices/{id}/workspaces` 发现。
 
 完整说明：[docs/cloud-agent-integration.md](docs/cloud-agent-integration.md)。可直接导入的 Postman 集合：[docs/postman/termio.postman_collection.json](docs/postman/termio.postman_collection.json)。
 
@@ -182,12 +196,14 @@ def call_tool(name, arguments, timeout_ms=30000, call_id=None):
 
 完整教程（含主动推消息、接消息、进度、超时/取消的原始帧）：[docs/debugging.md](docs/debugging.md)。
 
+想按“从进程启动到一条消息返回”的顺序逐点调试，看 [docs/debug-full-chain.md](docs/debug-full-chain.md)：每个功能点对应哪些文件/函数、在哪里下断点、如何验证多工作区与会话并发。
+
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 组件、连接生命周期、部署拓扑、多租户、UI 选型、多实例扩展 |
-| [docs/workspace.md](docs/workspace.md) | 工作区：默认 `~/.lares`、本地切换、相对路径规则、安全边界 |
+| [docs/workspace.md](docs/workspace.md) | 工作区/会话模型、多工作区配置、路由、热切换、并发与安全边界 |
 | [docs/roadmap.md](docs/roadmap.md) | V1.x / V2 / V3 计划与验收标准 |
 | [docs/protocol.md](docs/protocol.md) | WebSocket/JSON-RPC、HTTP API、错误码、幂等、限额 |
 | [docs/tools.md](docs/tools.md) | 内置工具、沙箱、**新增工具（二开）教程** |
@@ -195,12 +211,13 @@ def call_tool(name, arguments, timeout_ms=30000, call_id=None):
 | [docs/operations.md](docs/operations.md) | 配置、CLI、三端自启动、网关、构建、排障 |
 | [docs/cloud-agent-integration.md](docs/cloud-agent-integration.md) | 云端 Agent 接入细节 |
 | [docs/debugging.md](docs/debugging.md) | VS Code 断点调试 + Postman/WebSocket 联调 |
+| [docs/debug-full-chain.md](docs/debug-full-chain.md) | **全链路调试**：启动 → 注册 → 消息 → 工作区路由 → 工具 → 响应，逐功能点代码路径与断点 |
 | [docs/self-test.md](docs/self-test.md) | 用 termioctl 在终端输入 JSON 自测；Postman 用法 |
 
 ## 当前状态
 
 - v1 提供三个只读工具，不包含 shell/写操作。
-- 工作区已实现：默认 `~/.lares`，端子信息在 `~/.lares/.termio`（沙箱 deny，工具不可读写）；用户可本地选择其他目录。见 [docs/workspace.md](docs/workspace.md)。
+- 多工作区已实现：默认 `~/.lares`，端子信息在 `~/.lares/.termio`（沙箱 deny，工具不可读写）；用户可注册多个本地目录，会话按 `workspace_id` 路由。新增/删除工作区需重启 daemon，已注册工作区之间切换无需重启。见 [docs/workspace.md](docs/workspace.md)。
 - `termio-gateway` 是**参考实现**：单实例、内存态，不适合直接作为公网多租户服务。
 - 设备配对/OAuth、mTLS、token 轮换、端到端加密、写操作审批、离线任务队列尚未实现；生产化清单见安全文档。
 - Windows 已做本机端到端验证；macOS/Linux 产物已交叉编译，尚未在真实机器上运行验证。

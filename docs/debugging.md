@@ -31,7 +31,7 @@
 2. 按 `F5`，选择 **Termio: Gateway + Daemon**。
 3. 两个配置会并行启动：
    - Gateway：`127.0.0.1:8787`，token `dev-token`，日志级别 debug。
-   - Daemon：读取 `.debug/config.json`，device ID `dev_debug`，workspace 为当前工作区。
+   - Daemon：读取 `.debug/config.json`，device ID `dev_debug`，默认工作区为当前仓库；可手工添加更多工作区后用 `Termio Daemon (no init)` 启动。
 4. Daemon 启动前会执行 `termio: prepare debug config`，自动生成：
 
 ```json
@@ -40,8 +40,15 @@
   "device_id": "dev_debug",
   "device_name": "debug-device",
   "token": "dev-token",
-  "workspace": "<workspace>",
-  "allowed_roots": [],
+  "workspaces": [
+    {
+      "id": "ws_default",
+      "name": "default",
+      "path": "<workspace>",
+      "extra_roots": []
+    }
+  ],
+  "default_workspace_id": "ws_default",
   "max_concurrent_calls": 4,
   "call_timeout_ms": 30000,
   "log_level": "debug",
@@ -51,7 +58,7 @@
 
 - 组合调试会先执行一次初始化任务；单独启动 **Termio Daemon** 也会先初始化。
 - 每次初始化都会覆盖 `.debug/config.json`（`--force`）。
-- 想保留现场，使用 **Termio Daemon (no init)**，它不会执行初始化任务。
+- 想保留现场或测试多工作区，先手工编辑 `.debug/config.json`，再使用 **Termio Daemon (no init)**；否则 task 会把配置重置成单工作区。
 - 不走 VS Code task 时，也可以运行 `make debug-init`（Windows 无 make 时直接跑 tasks.json 里那条 `go run ... init ...` 命令）。
 - 两个进程同时启动时，daemon 可能先于 gateway 连接失败；它会 1 秒后重试，属正常现象。
 
@@ -64,7 +71,8 @@
 | `internal/gateway/session.go` | `readLoop` / `deliver` | 看地端响应如何配对 |
 | `internal/daemon/daemon.go` | `register` | 看注册参数和返回 |
 | `internal/daemon/daemon.go` | `readLoop` | 看原始 `data` 帧、方法分发 |
-| `internal/daemon/dispatcher.go` | `handleCall` | 看超时、取消、callId 缓存 |
+| `internal/daemon/workspace.go` | `LoadWorkspaces` / `Get` | 看每个工作区的 sandbox/registry 如何创建与选择 |
+| `internal/daemon/dispatcher.go` | `handleCall` | 看工作区路由、超时、取消、按工作区/会话/callId 缓存 |
 | `internal/tools/search_files.go` | `Call` | 看搜索参数、深度、结果 |
 | `internal/tools/read_file.go` | `Call` | 看截断、二进制判定 |
 | `internal/tools/sandbox.go` | `Resolve` | 看路径边界判断 |
@@ -72,6 +80,7 @@
 条件断点示例：
 
 - `handleCall`：`params.Name == "search_files"`
+- `handleCall`：`params.Meta.WorkspaceID == "ws_docs"`
 - `readLoop`：`msg.Method == "tools/call"`
 - `dispatch`：`params.Meta.CallID == "debug-call-1"`
 
@@ -109,8 +118,10 @@
 | `baseUrl` | `http://127.0.0.1:8787` | 网关地址 |
 | `token` | `dev-token` | 与网关 `--token` 一致 |
 | `deviceId` | `dev_debug` | 目标设备 |
+| `workspaceId` | `ws_default` | 默认工作区 ID |
+| `sessionId` | `debug-session` | 调试会话标签 |
 
-先执行 **List devices**（`GET /v1/devices`）。它的 Tests 脚本会把第一台设备 ID 写入集合变量 `deviceId`。
+先执行 **List devices**（`GET /v1/devices`）。它的 Tests 脚本会把第一台设备 ID 和默认工作区写入集合变量 `deviceId` / `workspaceId`。再执行 **List workspaces**（`GET /v1/devices/{id}/workspaces`）查看所有已注册工作区；只有 ID/名称，没有本地路径。
 
 然后依次试：
 
@@ -119,6 +130,8 @@
 - **System info**：`system_info`
 - **Duplicate call_id**：同一个 `call_id` 调两次；第二次应命中地端缓存
 - **Outside root**：读取 root 外路径，应返回 HTTP 200 + `isError: true`
+- **Workspace call**：带 `workspace_id`/`session_id` 调 `system_info`，结果 `_meta` 应回传这两个值
+- **Unknown workspace**：应返回 400 + `-32012`
 - **Unknown tool**：应返回 400 + `-32602`
 - **Missing auth**：应返回 401
 
@@ -186,6 +199,11 @@ Postman：**New → WebSocket**。
         }
       }
     ],
+    "workspaces": [
+      {"id": "ws_default", "name": "default"},
+      {"id": "ws_docs", "name": "docs"}
+    ],
+    "default_workspace_id": "ws_default",
     "max_inflight": 4
   }
 }
@@ -209,7 +227,7 @@ Postman：**New → WebSocket**。
 }
 ```
 
-此时 `GET /v1/devices` 应该能看到 `dev_postman` 和 `echo`。
+此时 `GET /v1/devices` 应该能看到 `dev_postman`、`echo`，以及 `ws_default`/`ws_docs`；`GET /v1/devices/dev_postman/workspaces` 能直接返回工作区列表。
 
 ### 3.4 主动推消息：从 HTTP 触发一次调用
 
@@ -226,7 +244,9 @@ Content-Type: application/json
   "name": "echo",
   "arguments": {"message": "hello from http"},
   "timeout_ms": 30000,
-  "call_id": "debug-call-1"
+  "call_id": "debug-call-1",
+  "workspace_id": "ws_docs",
+  "session_id": "debug-session"
 }
 ```
 
@@ -242,13 +262,15 @@ Content-Type: application/json
     "arguments": {"message": "hello from http"},
     "_meta": {
       "termio/callId": "debug-call-1",
+      "termio/workspaceId": "ws_docs",
+      "termio/sessionId": "debug-session",
       "termio/timeoutMs": 30000
     }
   }
 }
 ```
 
-这就是**云端主动推给地端的消息**。`id` 是网关生成的逐跳 ID；`callId` 是你 HTTP 里传的端到端幂等键。
+这就是**云端主动推给地端的消息**。`id` 是网关生成的逐跳 ID；`callId` 是端到端幂等键；`workspaceId`/`sessionId` 决定它在哪个工作区和会话上下文执行。省略 `workspace_id` 时，网关填入注册时的默认工作区 `ws_default`。
 
 ### 3.5 接消息并回复
 
@@ -284,7 +306,11 @@ Content-Type: application/json
     "progress": 1,
     "total": 2,
     "message": "working",
-    "_meta": {"termio/callId": "debug-call-1"}
+    "_meta": {
+      "termio/callId": "debug-call-1",
+      "termio/workspaceId": "ws_docs",
+      "termio/sessionId": "debug-session"
+    }
   }
 }
 ```
@@ -306,12 +332,18 @@ Content-Type: application/json
   "params": {
     "requestId": "g_c0ffee...",
     "reason": "client_cancelled",
-    "_meta": {"termio/callId": "debug-call-1"}
+    "_meta": {
+      "termio/callId": "debug-call-1",
+      "termio/workspaceId": "ws_docs",
+      "termio/sessionId": "debug-session"
+    }
   }
 }
 ```
 
 真实地端收到 cancel 后会取消执行并回 `-32800`；Postman 假设备可以直接忽略。
+
+> 完整链路（启动 → 注册 → HTTP 入站 → 工作区路由 → 工具 → 进度/取消 → 响应）的逐函数断点表见 [debug-full-chain.md](debug-full-chain.md)。
 
 ### 3.8 工具失败
 
@@ -361,6 +393,6 @@ HTTP 状态仍是 200，body 里 `isError: true`。这就是 Agent 应该读到�
 | 连接过一会儿断开 | 心跳/代理超时；重连并重新注册 |
 | 同一设备反复 4003 | 真实 daemon 和 Postman 用了同一个 deviceId；换一个 |
 | 端口 8787 被占用 | 修改 launch.json 的 `--addr`、tasks.json 的 `--url`、Postman 的 `baseUrl`，保持三处一致 |
-| 搜索返回 root 外错误 | 这是沙箱在正常工作；debug root 是当前工作区 |
+| 搜索返回 root 外错误 | 这是沙箱在正常工作；确认调用的 `workspace_id` 与目标目录一致 |
 | 修改配置后没生效 | `Termio Daemon` 每次会 `--force` 重建；用 `Termio Daemon (no init)` 或改 tasks.json |
 | Windows 调试器找不到 dlv | 安装 Go 扩展，或 `go install github.com/go-delve/delve/cmd/dlv@latest` |

@@ -24,18 +24,19 @@ v1 的目标是把这条链路做稳：注册、调用、进度、取消、超�
 ┌───────────────────────────────────▼───────────────────────────┐
 │  地端 termio daemon                                            │
 │    ├─ 配置 / 日志 / 自启动                                     │
-│    ├─ os.Root 沙箱                                             │
-│    ├─ 工具注册表（search_files / read_file / system_info）     │
-│    └─ 调度器：并发、超时、取消、进度、callId 幂等缓存          │
+│    ├─ 工作区注册表（WorkspaceSet）                             │
+│    │    ├─ Workspace A: os.Root + 工具注册表 + 并发信号量      │
+│    │    └─ Workspace B: os.Root + 工具注册表 + 并发信号量      │
+│    └─ 调度器：工作区/会话路由、超时、取消、进度、幂等缓存       │
 └────────────────────────────────────────────────────────────────┘
 ```
 
 ### `termio`（地端）
 
-- 读取配置，打开 workspace 和额外 allowed roots，构建工具注册表。
-- `$LARES` 是 app home，默认 `~/.lares`；端子信息（config、token、日志）在 `$LARES/.termio`，该目录被沙箱 deny，工具不可读写。
-- 工作区：默认 `$LARES`；用户可在本地选择其他目录；工具默认在该工作区下工作，相对路径相对工作区解析。详见 [workspace.md](workspace.md)。
-- 主动连接 `gateway_url`，发送 `termio/register`，上报设备信息和工具列表。
+- 读取配置，为每个已注册工作区打开独立 `os.Root` 沙箱和工具注册表。
+- `$LARES` 是 app home，默认 `~/.lares`；端子信息（config、token、日志）在 `$LARES/.termio`，该目录对**所有**工作区 deny，工具不可读写。
+- 工作区：默认 `$LARES`；用户可注册多个本地目录；每次调用按 `workspaceId` 选择工作区，省略时用默认工作区。一个工作区可服务多个会话/任务。详见 [workspace.md](workspace.md)。
+- 主动连接 `gateway_url`，发送 `termio/register`，上报设备信息、工具列表和工作区 ID/名称（不报路径）。
 - 维护心跳；断线后指数退避重连。
 - 收到 `tools/call` 后交给调度器；每个调用独立 goroutine，读循环不被阻塞。
 - 执行工具，发送 progress 和最终结果；支持 `notifications/cancelled`。
@@ -76,12 +77,35 @@ Cloud Agent          Gateway                    Daemon
 - 进度通知 v1 只在网关日志中可见，不通过 HTTP 流式返回；最终结果同步返回。
 - 云端断开时，网关向地端发送 cancel；地端取消 context。
 
+## 工作区与会话路由
+
+```
+Cloud 会话/任务 ── workspace_id + session_id ──▶ Gateway ──▶ Daemon
+                                                              │
+                                    ┌─────────────────────────┴──────────────┐
+                                    ▼                                        ▼
+                            Workspace A (ws_a)                       Workspace B (ws_b)
+                            os.Root A + Registry A                   os.Root B + Registry B
+                            Semaphore A                              Semaphore B
+                                    ▲                                        ▲
+                              会话 1、会话 2                            会话 3
+```
+
+- **工作区 1:N 会话**：同一工作区的多个云端会话共享目录和沙箱；会话只是调用上下文，不是隔离副本。
+- **每次调用固定一个工作区**：daemon 在收到 `tools/call` 时解析 `_meta["termio/workspaceId"]`（空则默认），之后整个调用只使用该 `Workspace` 的 sandbox/registry。
+- **工作区之间并发**：每个工作区有自己的信号量；A 的长任务不会占满 B 的额度。
+- **热切换**：已注册工作区之间的切换只是换一个 ID，不需要重连或重启。
+- **增删工作区**：daemon 启动时打开所有沙箱，网关也在注册时缓存列表，因此 v1 新增/删除工作区需要重启 daemon；重启会取消在途调用。
+- **幂等域**：`(workspaceId, sessionId, callId)`；同一 callId 跨工作区/会话互不影响。
+- **可观测性**：结果、progress、cancel 的 `_meta` 都带工作区和会话，日志也按这两个维度记录。
+
 ## 多租户模型
 
 Termio 的隔离主要发生在三个位置：
 
 1. **网关路由**：设备用 `device_id` 标识；每个设备有独立 token。按设备 token 鉴权时，调用方只能访问自己那台设备。`--token` 共享令牌只为开发方便，不应作为多租户生产配置。
-2. **地端沙箱**：每台设备只打开自己的 `workspace` 和额外 allowed roots；工具无法访问这些目录之外的路径。工作区由本地用户选择，云端不能更改，见 [workspace.md](workspace.md)。
+2. **地端沙箱**：每台设备为每个已注册工作区打开独立沙箱；一次调用只能进入其中一个工作区，工具无法访问该工作区及其额外根之外的路径。工作区由本地用户注册，云端只能选择 ID，不能新增路径，见 [workspace.md](workspace.md)。
+   - `session_id` 不是安全边界：同设备的不同会话共享设备 token 的权限；不要用它表达跨租户隔离。
 3. **工具白名单**：地端只注册只读工具，且没有 shell/写操作；云端无法通过 Termio 执行任意命令。
 
 v1 的参考网关用静态 `--devices-file` 保存 `device_id → token`。生产环境应替换为：

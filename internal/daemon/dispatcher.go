@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,13 +16,12 @@ import (
 )
 
 const (
-	dedupeTTL         = 10 * time.Minute
-	dedupeLimit       = 1024
-	progressInterval  = 250 * time.Millisecond
-	maxToolTimeout    = 5 * time.Minute
-	minToolTimeout    = time.Second
-	fallbackTimeout   = 30 * time.Second
-	maxInFlightPerDev = 32
+	dedupeTTL        = 10 * time.Minute
+	dedupeLimit      = 1024
+	progressInterval = 250 * time.Millisecond
+	maxToolTimeout   = 5 * time.Minute
+	minToolTimeout   = time.Second
+	fallbackTimeout  = 30 * time.Second
 )
 
 var (
@@ -32,11 +32,10 @@ var (
 )
 
 type dispatcher struct {
-	registry       *tools.Registry
+	workspaces     *WorkspaceSet
 	writer         *wsx.Writer
 	log            *slog.Logger
 	defaultTimeout time.Duration
-	sem            chan struct{}
 
 	mu        sync.Mutex
 	inflight  map[string]*callState
@@ -45,8 +44,11 @@ type dispatcher struct {
 }
 
 type callState struct {
-	callID string
-	cancel context.CancelCauseFunc
+	key         string
+	workspaceID string
+	sessionID   string
+	callID      string
+	cancel      context.CancelCauseFunc
 }
 
 type cachedResult struct {
@@ -64,22 +66,15 @@ const (
 	reserveMismatch
 )
 
-func newDispatcher(registry *tools.Registry, writer *wsx.Writer, log *slog.Logger, maxConcurrent int, defaultTimeout time.Duration) *dispatcher {
-	if maxConcurrent < 1 {
-		maxConcurrent = 1
-	}
-	if maxConcurrent > maxInFlightPerDev {
-		maxConcurrent = maxInFlightPerDev
-	}
+func newDispatcher(workspaces *WorkspaceSet, writer *wsx.Writer, log *slog.Logger, defaultTimeout time.Duration) *dispatcher {
 	if defaultTimeout <= 0 {
 		defaultTimeout = fallbackTimeout
 	}
 	return &dispatcher{
-		registry:       registry,
+		workspaces:     workspaces,
 		writer:         writer,
 		log:            log,
 		defaultTimeout: defaultTimeout,
-		sem:            make(chan struct{}, maxConcurrent),
 		inflight:       make(map[string]*callState),
 		rpcToCall:      make(map[string]string),
 		completed:      make(map[string]cachedResult),
@@ -101,14 +96,31 @@ func (d *dispatcher) handleCall(parent context.Context, msg *protocol.Message) {
 		d.sendError(parent, msg.ID, protocol.CodeInvalidParams, "missing _meta termio/callId")
 		return
 	}
-	if len(callID) > 128 {
-		d.sendError(parent, msg.ID, protocol.CodeInvalidParams, "callId is too long")
+	if !validCallID(callID) {
+		d.sendError(parent, msg.ID, protocol.CodeInvalidParams, "callId must be 1-128 printable characters without NUL")
 		return
 	}
+	workspaceID := strings.TrimSpace(params.Meta.WorkspaceID)
+	sessionID := strings.TrimSpace(params.Meta.SessionID)
+	if !validSessionID(sessionID) {
+		d.sendError(parent, msg.ID, protocol.CodeInvalidParams, "sessionId must be at most 256 printable characters")
+		return
+	}
+	ws, err := d.workspaces.Get(workspaceID)
+	if err != nil {
+		requested := workspaceID
+		if requested == "" {
+			requested = d.workspaces.DefaultID()
+		}
+		d.sendError(parent, msg.ID, protocol.CodeUnknownWorkspace, fmt.Sprintf("unknown workspace %q", requested))
+		return
+	}
+	workspaceID = ws.ID
+	key := callKey(workspaceID, sessionID, callID)
 	fingerprint := params.Name + "\x00" + string(params.Arguments)
 
 	// Fast path: replay a completed call without consuming an execution slot.
-	if replay, found, mismatch := d.lookupCache(callID, fingerprint, msg.ID); found {
+	if replay, found, mismatch := d.lookupCache(key, fingerprint, msg.ID); found {
 		if mismatch {
 			d.sendError(parent, msg.ID, protocol.CodeInvalidParams, "callId was reused with different tool or arguments")
 			return
@@ -118,10 +130,10 @@ func (d *dispatcher) handleCall(parent context.Context, msg *protocol.Message) {
 	}
 
 	select {
-	case d.sem <- struct{}{}:
-		defer func() { <-d.sem }()
+	case ws.Sem <- struct{}{}:
+		defer func() { <-ws.Sem }()
 	default:
-		d.sendError(parent, msg.ID, protocol.CodeOverloaded, "device is busy")
+		d.sendError(parent, msg.ID, protocol.CodeOverloaded, "workspace is busy")
 		return
 	}
 
@@ -129,7 +141,7 @@ func (d *dispatcher) handleCall(parent context.Context, msg *protocol.Message) {
 	callCtx, cancel := context.WithCancelCause(parent)
 	defer cancel(errCallDone)
 
-	replay, status := d.reserve(callID, fingerprint, msg.ID, cancel)
+	replay, status := d.reserve(key, workspaceID, sessionID, callID, fingerprint, msg.ID, cancel)
 	switch status {
 	case reserveDuplicate:
 		d.sendError(parent, msg.ID, protocol.CodeDuplicateCall, "callId is already in flight")
@@ -145,7 +157,7 @@ func (d *dispatcher) handleCall(parent context.Context, msg *protocol.Message) {
 		return
 	case reserveStarted:
 	}
-	defer d.release(callID, msg.ID)
+	defer d.release(key, msg.ID)
 
 	timer := time.AfterFunc(timeout, func() { cancel(errCallTimeout) })
 	defer timer.Stop()
@@ -160,6 +172,8 @@ func (d *dispatcher) handleCall(parent context.Context, msg *protocol.Message) {
 		ctx:         callCtx,
 		token:       token,
 		callID:      callID,
+		workspaceID: workspaceID,
+		sessionID:   sessionID,
 		minInterval: progressInterval,
 	}
 
@@ -170,19 +184,19 @@ func (d *dispatcher) handleCall(parent context.Context, msg *protocol.Message) {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				d.log.Error("tool panicked", "tool", params.Name, "panic", fmt.Sprint(r))
+				d.log.Error("tool panicked", "tool", params.Name, "workspace", workspaceID, "panic", fmt.Sprint(r))
 				result = toolErrorResult(fmt.Sprintf("internal tool error: %v", r))
 				callErr = nil
 			}
 		}()
-		result, callErr = d.registry.Call(callCtx, params.Name, params.Arguments, progress.send)
+		result, callErr = ws.Registry.Call(callCtx, params.Name, params.Arguments, progress.send)
 	}()
 
 	cause := context.Cause(callCtx)
 	if cause != nil {
 		switch {
 		case errors.Is(cause, errShutdown):
-			d.log.Debug("call abandoned during shutdown", "call_id", callID)
+			d.log.Debug("call abandoned during shutdown", "call_id", callID, "workspace", workspaceID)
 			return
 		case errors.Is(cause, errCallCancelled):
 			d.sendError(parent, msg.ID, protocol.CodeRequestCancelled, "call cancelled")
@@ -191,7 +205,7 @@ func (d *dispatcher) handleCall(parent context.Context, msg *protocol.Message) {
 			result = toolErrorResult(fmt.Sprintf("tool timed out after %s", timeout))
 			callErr = nil
 		case parent.Err() != nil:
-			d.log.Debug("call abandoned because the session closed", "call_id", callID)
+			d.log.Debug("call abandoned because the session closed", "call_id", callID, "workspace", workspaceID)
 			return
 		}
 	}
@@ -207,24 +221,56 @@ func (d *dispatcher) handleCall(parent context.Context, msg *protocol.Message) {
 	}
 
 	result.Meta.CallID = callID
+	result.Meta.WorkspaceID = workspaceID
+	result.Meta.SessionID = sessionID
 	resp, err := protocol.NewResult(msg.ID, result)
 	if err != nil {
 		d.sendError(parent, msg.ID, protocol.CodeInternalError, "encode result: "+err.Error())
 		return
 	}
-	d.cachePut(callID, fingerprint, resp.Result)
+	d.cachePut(key, fingerprint, resp.Result)
 	d.send(parent, resp)
 }
 
-func (d *dispatcher) lookupCache(callID, fingerprint, rpcID string) (*protocol.Message, bool, bool) {
+func callKey(workspaceID, sessionID, callID string) string {
+	return workspaceID + "\x00" + sessionID + "\x00" + callID
+}
+
+// validCallID prevents NUL injection into the composite idempotency key.
+// Workspace IDs are validated in config; session IDs are only checked here.
+func validCallID(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func validSessionID(s string) bool {
+	if len(s) > 256 {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *dispatcher) lookupCache(key, fingerprint, rpcID string) (*protocol.Message, bool, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	cached, ok := d.completed[callID]
+	cached, ok := d.completed[key]
 	if !ok {
 		return nil, false, false
 	}
 	if time.Now().After(cached.expires) {
-		delete(d.completed, callID)
+		delete(d.completed, key)
 		return nil, false, false
 	}
 	if cached.fingerprint != fingerprint {
@@ -233,36 +279,42 @@ func (d *dispatcher) lookupCache(callID, fingerprint, rpcID string) (*protocol.M
 	return &protocol.Message{JSONRPC: "2.0", ID: rpcID, Result: cached.result}, true, false
 }
 
-func (d *dispatcher) reserve(callID, fingerprint, rpcID string, cancel context.CancelCauseFunc) (*protocol.Message, reserveStatus) {
+func (d *dispatcher) reserve(key, workspaceID, sessionID, callID, fingerprint, rpcID string, cancel context.CancelCauseFunc) (*protocol.Message, reserveStatus) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if cached, ok := d.completed[callID]; ok {
+	if cached, ok := d.completed[key]; ok {
 		if time.Now().Before(cached.expires) {
 			if cached.fingerprint != fingerprint {
 				return nil, reserveMismatch
 			}
 			return &protocol.Message{JSONRPC: "2.0", ID: rpcID, Result: cached.result}, reserveCached
 		}
-		delete(d.completed, callID)
+		delete(d.completed, key)
 	}
-	if _, ok := d.inflight[callID]; ok {
+	if _, ok := d.inflight[key]; ok {
 		return nil, reserveDuplicate
 	}
-	d.inflight[callID] = &callState{callID: callID, cancel: cancel}
-	d.rpcToCall[rpcID] = callID
+	d.inflight[key] = &callState{
+		key:         key,
+		workspaceID: workspaceID,
+		sessionID:   sessionID,
+		callID:      callID,
+		cancel:      cancel,
+	}
+	d.rpcToCall[rpcID] = key
 	return nil, reserveStarted
 }
 
-func (d *dispatcher) release(callID, rpcID string) {
+func (d *dispatcher) release(key, rpcID string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	delete(d.inflight, callID)
-	if d.rpcToCall[rpcID] == callID {
+	delete(d.inflight, key)
+	if d.rpcToCall[rpcID] == key {
 		delete(d.rpcToCall, rpcID)
 	}
 }
 
-func (d *dispatcher) cachePut(callID, fingerprint string, result json.RawMessage) {
+func (d *dispatcher) cachePut(key, fingerprint string, result json.RawMessage) {
 	if len(result) == 0 {
 		result = json.RawMessage("{}")
 	}
@@ -270,18 +322,18 @@ func (d *dispatcher) cachePut(callID, fingerprint string, result json.RawMessage
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if len(d.completed) >= dedupeLimit {
-		for key, cached := range d.completed {
+		for k, cached := range d.completed {
 			if now.After(cached.expires) {
-				delete(d.completed, key)
+				delete(d.completed, k)
 			}
 		}
 		for len(d.completed) >= dedupeLimit {
-			for key := range d.completed {
-				delete(d.completed, key)
+			for k := range d.completed {
+				delete(d.completed, k)
 			}
 		}
 	}
-	d.completed[callID] = cachedResult{
+	d.completed[key] = cachedResult{
 		fingerprint: fingerprint,
 		result:      append(json.RawMessage(nil), result...),
 		expires:     now.Add(dedupeTTL),
@@ -290,14 +342,18 @@ func (d *dispatcher) cachePut(callID, fingerprint string, result json.RawMessage
 
 func (d *dispatcher) cancelCall(params protocol.CancelledParams) {
 	d.mu.Lock()
-	callID := ""
+	key := ""
 	if params.RequestID != "" {
-		callID = d.rpcToCall[params.RequestID]
+		key = d.rpcToCall[params.RequestID]
 	}
-	if callID == "" {
-		callID = params.Meta.CallID
+	if key == "" {
+		workspaceID := strings.TrimSpace(params.Meta.WorkspaceID)
+		if workspaceID == "" {
+			workspaceID = d.workspaces.DefaultID()
+		}
+		key = callKey(workspaceID, params.Meta.SessionID, params.Meta.CallID)
 	}
-	state := d.inflight[callID]
+	state := d.inflight[key]
 	d.mu.Unlock()
 	if state != nil {
 		state.cancel(errCallCancelled)
@@ -365,6 +421,8 @@ type progressSender struct {
 	ctx         context.Context
 	token       string
 	callID      string
+	workspaceID string
+	sessionID   string
 	minInterval time.Duration
 
 	mu   sync.Mutex
@@ -389,7 +447,11 @@ func (p *progressSender) send(progress, total float64, message string) {
 		Progress:      progress,
 		Total:         total,
 		Message:       message,
-		Meta:          protocol.CallMeta{CallID: p.callID},
+		Meta: protocol.CallMeta{
+			CallID:      p.callID,
+			WorkspaceID: p.workspaceID,
+			SessionID:   p.sessionID,
+		},
 	})
 	if err != nil {
 		return

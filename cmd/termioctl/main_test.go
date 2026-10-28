@@ -41,12 +41,15 @@ func TestNormalizeGateway(t *testing.T) {
 }
 
 func TestParseCallDirect(t *testing.T) {
-	call, err := parseCall(`{"name":"search_files","arguments":{"pattern":"*.go"},"timeout_ms":5000,"call_id":"c1"}`, 30000)
+	call, err := parseCall(`{"name":"search_files","arguments":{"pattern":"*.go"},"timeout_ms":5000,"call_id":"c1","workspace_id":"ws_docs","session_id":"chat-1"}`, 30000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if call.Name != "search_files" || call.TimeoutMS != 5000 || call.CallID != "c1" {
 		t.Fatalf("call = %+v", call)
+	}
+	if call.WorkspaceID != "ws_docs" || call.SessionID != "chat-1" {
+		t.Fatalf("scope = %+v", call)
 	}
 	var args map[string]any
 	if err := json.Unmarshal(call.Arguments, &args); err != nil {
@@ -65,7 +68,12 @@ func TestParseCallJSONRPC(t *testing.T) {
 		"params":{
 			"name":"system_info",
 			"arguments":{},
-			"_meta":{"termio/callId":"c2","termio/timeoutMs":7000}
+			"_meta":{
+				"termio/callId":"c2",
+				"termio/timeoutMs":7000,
+				"termio/workspaceId":"ws_a",
+				"termio/sessionId":"s1"
+			}
 		}
 	}`
 	call, err := parseCall(raw, 30000)
@@ -74,6 +82,9 @@ func TestParseCallJSONRPC(t *testing.T) {
 	}
 	if call.Name != "system_info" || call.CallID != "c2" || call.TimeoutMS != 7000 {
 		t.Fatalf("call = %+v", call)
+	}
+	if call.WorkspaceID != "ws_a" || call.SessionID != "s1" {
+		t.Fatalf("scope = %+v", call)
 	}
 }
 
@@ -109,7 +120,13 @@ func TestSend(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := &client{baseURL: server.URL, token: "tok", http: server.Client()}
+	c := &client{
+		baseURL:     server.URL,
+		token:       "tok",
+		http:        server.Client(),
+		workspaceID: "ws_default",
+		sessionID:   "session-default",
+	}
 	out, err := c.send("dev_1", `{"name":"system_info","arguments":{}}`, 30000)
 	if err != nil {
 		t.Fatal(err)
@@ -128,6 +145,35 @@ func TestSend(t *testing.T) {
 	}
 	if gotBody["timeout_ms"].(float64) != 30000 {
 		t.Fatalf("timeout = %v", gotBody["timeout_ms"])
+	}
+	if gotBody["workspace_id"] != "ws_default" || gotBody["session_id"] != "session-default" {
+		t.Fatalf("scope defaults not sent: %v", gotBody)
+	}
+}
+
+func TestSendBodyScopeOverridesClientDefaults(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		fmt.Fprint(w, `{"content":[{"type":"text","text":"ok"}]}`)
+	}))
+	defer server.Close()
+
+	c := &client{
+		baseURL:     server.URL,
+		token:       "tok",
+		http:        server.Client(),
+		workspaceID: "ws_default",
+		sessionID:   "session-default",
+	}
+	_, err := c.send("dev_1", `{"name":"system_info","arguments":{},"workspace_id":"ws_other","session_id":"chat-9"}`, 30000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["workspace_id"] != "ws_other" || gotBody["session_id"] != "chat-9" {
+		t.Fatalf("body scope = %v", gotBody)
 	}
 }
 

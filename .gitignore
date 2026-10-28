@@ -10,3 +10,5 @@
 /devices.local.json
 *.postman_environment.json
 coverage.out
+start.md
+__debug_bin*

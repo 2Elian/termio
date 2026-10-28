@@ -13,7 +13,8 @@ Agent LLM ──tool_use──▶ 你的 tool stub ──HTTP──▶ termio-ga
 - 网关地址（生产为 `https://` + `wss://`）
 - 云端可用的 Bearer token
 - 目标设备已在线，且知道其 `device_id`
-- 网关的 `/v1/devices` 能看到该设备和工具列表
+- 网关的 `/v1/devices` 能看到该设备、工具列表和工作区列表
+- 云端会话/任务已经决定使用哪个 `workspace_id`（省略则用设备默认工作区）
 
 ## HTTP 契约
 
@@ -28,11 +29,16 @@ Content-Type: application/json
   "name": "search_files",
   "arguments": {"pattern": "*.go", "max_results": 20},
   "timeout_ms": 30000,
-  "call_id": "stable-id-for-retries"
+  "call_id": "stable-id-for-retries",
+  "workspace_id": "ws_docs",
+  "session_id": "chat-42"
 }
 ```
 
 - `call_id` 可选。**重试时必须复用**；新的逻辑调用应生成新 ID。
+- `workspace_id` 可选；省略时网关使用设备注册的默认工作区。未知 ID 返回 400 + `-32012`。
+- `session_id` 可选；同一工作区可以有多个会话。它只用于关联/幂等作用域，不参与鉴权。
+- 幂等重试必须保持 `(workspace_id, session_id, call_id)` 一致，否则会被当成新的调用。
 - `timeout_ms` 可选；最终超时还会受网关配置约束。
 - 成功返回 MCP `CallToolResult`；工具失败是 HTTP 200 + `isError: true`。
 - 协议错误返回非 2xx + `{"error":{"code":...,"message":"..."}}`。
@@ -50,10 +56,15 @@ DEVICE_ID = "dev_..."
 TOKEN = "cloud-or-device-token"
 
 
-def call_tool(name, arguments, timeout_ms=30000, call_id=None):
+def call_tool(name, arguments, timeout_ms=30000, call_id=None,
+              workspace_id=None, session_id=None):
     body = {"name": name, "arguments": arguments, "timeout_ms": timeout_ms}
     if call_id:
         body["call_id"] = call_id
+    if workspace_id:
+        body["workspace_id"] = workspace_id
+    if session_id:
+        body["session_id"] = session_id
 
     req = urllib.request.Request(
         f"{GATEWAY}/v1/devices/{DEVICE_ID}/tools/call",
@@ -68,11 +79,13 @@ def call_tool(name, arguments, timeout_ms=30000, call_id=None):
         return json.load(resp)
 
 
-def search_files(pattern, path=None, max_results=50, call_id=None):
+def search_files(pattern, path=None, max_results=50, call_id=None,
+                 workspace_id=None, session_id=None):
     args = {"pattern": pattern, "max_results": max_results}
     if path:
         args["path"] = path
-    result = call_tool("search_files", args, call_id=call_id)
+    result = call_tool("search_files", args, call_id=call_id,
+                       workspace_id=workspace_id, session_id=session_id)
     if result.get("isError"):
         raise RuntimeError(result["content"][0]["text"])
     return result.get("structuredContent", {})
@@ -80,13 +93,32 @@ def search_files(pattern, path=None, max_results=50, call_id=None):
 
 完整示例在 `examples/cloud_tool_stub.py`。
 
-## 工具发现与 schema 映射
+## 工具与工作区发现
 
 ```http
 GET /v1/devices/{device_id}/tools
+GET /v1/devices/{device_id}/workspaces
 ```
 
-返回：
+`/workspaces` 返回：
+
+```json
+{
+  "device_id": "dev_...",
+  "workspaces": [
+    {"id": "ws_default", "name": "default"},
+    {"id": "ws_docs", "name": "docs"}
+  ],
+  "default_workspace_id": "ws_default"
+}
+```
+
+- 只暴露 ID/名称，本地路径永远不会返回给云端。
+- 会话/任务应固定自己的 `workspace_id`；不要在同一条任务里无理由来回切换。
+- 一个工作区可以有多个会话；需要区分对话时传不同的 `session_id`。
+- 新增/删除工作区由本地用户操作，daemon 重启后云端重新拉取列表。
+
+工具列表返回：
 
 ```json
 {
@@ -154,7 +186,7 @@ openai_tools = [
 重试规则：
 
 - 网络错误、502、504、429 可以重试。
-- 重试**复用同一个 `call_id`**；地端在 10 分钟内会重放已完成结果。
+- 重试**复用同一个 `(workspace_id, session_id, call_id)`**；地端在 10 分钟内会重放该键的已完成结果。
 - 4xx（除 429）通常不要重试。
 - 超时后如果换新 callId，可能重复执行；只读工具重复执行通常无害，但仍应尽量复用。
 
@@ -199,6 +231,7 @@ v1 的 HTTP API 是同步的：
 
 - `baseUrl` = `http://127.0.0.1:8787`
 - `token` = 网关 token
-- 先执行 **List devices**，测试脚本会自动把第一台设备写入 `deviceId`
+- 先执行 **List devices**，测试脚本会自动把第一台设备写入 `deviceId`；再执行 **List workspaces** 获取 `workspaceId`
+- 集合里有带 `workspace_id`/`session_id` 的调用示例和未知工作区用例
 
 更完整的“Postman 当假设备、手动接收推送消息”的教程见 [debugging.md](debugging.md)。

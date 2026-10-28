@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Termio API",
-    "description": "HTTP collection for the Termio reference gateway. Run 'List devices' first: its test script stores the first device id in the deviceId variable. For a fake-device WebSocket walkthrough, see docs/debugging.md.",
+    "description": "HTTP collection for the Termio reference gateway. Run 'List devices' first: its test script stores the first device id and default workspace in deviceId/workspaceId. Run 'List workspaces' to inspect all registered workspaces. For a fake-device WebSocket walkthrough, see docs/debugging.md.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -16,6 +16,18 @@
     {
       "key": "deviceId",
       "value": "dev_debug"
+    },
+    {
+      "key": "workspaceId",
+      "value": "ws_default"
+    },
+    {
+      "key": "otherWorkspaceId",
+      "value": "ws_other"
+    },
+    {
+      "key": "sessionId",
+      "value": "postman-session"
     },
     {
       "key": "readPath",
@@ -72,6 +84,13 @@
               "if (body.devices && body.devices.length > 0) {",
               "  pm.collectionVariables.set('deviceId', body.devices[0].id);",
               "  console.log('deviceId set to', body.devices[0].id);",
+              "  if (body.devices[0].default_workspace_id) {",
+              "    pm.collectionVariables.set('workspaceId', body.devices[0].default_workspace_id);",
+              "  }",
+              "  const workspaces = body.devices[0].workspaces || [];",
+              "  if (workspaces.length > 1) {",
+              "    pm.collectionVariables.set('otherWorkspaceId', workspaces[1].id);",
+              "  }",
               "}"
             ]
           }
@@ -97,6 +116,34 @@
             "type": "text/javascript",
             "exec": [
               "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "List workspaces",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": "{{baseUrl}}/v1/devices/{{deviceId}}/workspaces"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "const body = pm.response.json();",
+              "pm.test('has workspaces', function () { pm.expect(body.workspaces).to.be.an('array').that.is.not.empty; });",
+              "pm.test('no local paths exposed', function () { body.workspaces.forEach(function (w) { pm.expect(w.path).to.be.undefined; pm.expect(w.extra_roots).to.be.undefined; }); });",
+              "pm.test('has default workspace', function () { pm.expect(body.default_workspace_id).to.be.a('string').that.is.not.empty; });"
             ]
           }
         }
@@ -198,7 +245,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"name\": \"system_info\",\n  \"arguments\": {}\n}",
+          "raw": "{\n  \"name\": \"system_info\",\n  \"arguments\": {},\n  \"workspace_id\": \"{{workspaceId}}\",\n  \"session_id\": \"{{sessionId}}\"\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -217,7 +264,87 @@
               "const body = pm.response.json();",
               "pm.test('has allowed roots', function () {",
               "  pm.expect(body.structuredContent.allowed_roots).to.be.an('array');",
-              "});"
+              "});",
+              "pm.test('echoes workspace id', function () { pm.expect(body._meta['termio/workspaceId']).to.eql(pm.collectionVariables.get('workspaceId')); });",
+              "pm.test('echoes session id', function () { pm.expect(body._meta['termio/sessionId']).to.eql(pm.collectionVariables.get('sessionId')); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Workspace call (explicit workspace)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"system_info\",\n  \"arguments\": {},\n  \"workspace_id\": \"{{otherWorkspaceId}}\",\n  \"session_id\": \"postman-other-session\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/v1/devices/{{deviceId}}/tools/call"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "const body = pm.response.json();",
+              "pm.test('tool did not fail', function () { pm.expect(body.isError).to.not.equal(true); });",
+              "pm.test('ran in requested workspace', function () { pm.expect(body._meta['termio/workspaceId']).to.eql(pm.collectionVariables.get('otherWorkspaceId')); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Unknown workspace (expect 400)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"system_info\",\n  \"arguments\": {},\n  \"workspace_id\": \"ws_does_not_exist\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{baseUrl}}/v1/devices/{{deviceId}}/tools/call"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status is 400', function () { pm.response.to.have.status(400); });",
+              "pm.test('error code is -32012', function () { pm.expect(pm.response.json().error.code).to.eql(-32012); });"
             ]
           }
         }
@@ -239,7 +366,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"name\": \"search_files\",\n  \"arguments\": {\n    \"pattern\": \"*.md\",\n    \"max_results\": 5\n  },\n  \"timeout_ms\": 30000,\n  \"call_id\": \"postman-dup-1\"\n}",
+          "raw": "{\n  \"name\": \"search_files\",\n  \"arguments\": {\n    \"pattern\": \"*.md\",\n    \"max_results\": 5\n  },\n  \"timeout_ms\": 30000,\n  \"call_id\": \"postman-dup-1\",\n  \"workspace_id\": \"{{workspaceId}}\",\n  \"session_id\": \"{{sessionId}}\"\n}",
           "options": {
             "raw": {
               "language": "json"

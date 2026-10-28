@@ -25,20 +25,35 @@ const (
 	MaxConcurrentCallsLimit = 32
 	DefaultHomeDirName      = ".lares"
 	AppDataDirName          = ".termio"
+	DefaultWorkspaceID      = "ws_default"
+	MaxWorkspaces           = 64
 )
+
+// WorkspaceConfig is one locally authorized workspace. ID is opaque to the
+// cloud; Path is never sent in tool calls.
+type WorkspaceConfig struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name,omitempty"`
+	Path       string   `json:"path"`
+	ExtraRoots []string `json:"extra_roots,omitempty"`
+}
 
 // Config is the on-disk daemon configuration.
 type Config struct {
-	GatewayURL         string   `json:"gateway_url"`
-	DeviceID           string   `json:"device_id"`
-	DeviceName         string   `json:"device_name"`
-	Token              string   `json:"token"`
-	Workspace          string   `json:"workspace"`
-	AllowedRoots       []string `json:"allowed_roots"`
-	MaxConcurrentCalls int      `json:"max_concurrent_calls"`
-	CallTimeoutMS      int      `json:"call_timeout_ms"`
-	LogLevel           string   `json:"log_level"`
-	LogFile            string   `json:"log_file"`
+	GatewayURL         string            `json:"gateway_url"`
+	DeviceID           string            `json:"device_id"`
+	DeviceName         string            `json:"device_name"`
+	Token              string            `json:"token"`
+	Workspaces         []WorkspaceConfig `json:"workspaces,omitempty"`
+	DefaultWorkspaceID string            `json:"default_workspace_id,omitempty"`
+	MaxConcurrentCalls int               `json:"max_concurrent_calls"`
+	CallTimeoutMS      int               `json:"call_timeout_ms"`
+	LogLevel           string            `json:"log_level"`
+	LogFile            string            `json:"log_file"`
+
+	// Legacy single-workspace fields, read for migration and omitted on save.
+	Workspace    string   `json:"workspace,omitempty"`
+	AllowedRoots []string `json:"allowed_roots,omitempty"`
 }
 
 // AppHome returns the per-user Termio home. It defaults to ~/.lares and can
@@ -133,10 +148,15 @@ func NewDefault() (*Config, error) {
 		return nil, err
 	}
 	return &Config{
-		GatewayURL:         DefaultGatewayURL,
-		DeviceID:           id,
-		DeviceName:         host,
-		Workspace:          workspace,
+		GatewayURL: DefaultGatewayURL,
+		DeviceID:   id,
+		DeviceName: host,
+		Workspaces: []WorkspaceConfig{{
+			ID:   DefaultWorkspaceID,
+			Name: "default",
+			Path: workspace,
+		}},
+		DefaultWorkspaceID: DefaultWorkspaceID,
 		MaxConcurrentCalls: DefaultMaxConcurrent,
 		CallTimeoutMS:      DefaultCallTimeoutMS,
 		LogLevel:           "info",
@@ -174,7 +194,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	c.applyDefaults()
-	if err := c.migrateWorkspace(); err != nil {
+	if err := c.normalizeWorkspaces(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := c.Validate(); err != nil {
@@ -183,33 +203,220 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
-// migrateWorkspace supports configs written before the workspace concept:
-// the first allowed root becomes the workspace and the rest stay as extras.
-// It also normalizes both lists and removes duplicates.
-func (c *Config) migrateWorkspace() error {
-	if c.Workspace == "" {
-		if len(c.AllowedRoots) > 0 {
-			c.Workspace = c.AllowedRoots[0]
-			c.AllowedRoots = append([]string(nil), c.AllowedRoots[1:]...)
-		} else {
-			ws, err := DefaultWorkspacePath()
+// normalizeWorkspaces migrates the legacy single workspace and normalizes all
+// workspace paths, IDs, and extra roots. It clears legacy fields so Save writes
+// only the new schema.
+func (c *Config) normalizeWorkspaces() error {
+	if len(c.Workspaces) > MaxWorkspaces {
+		return fmt.Errorf("too many workspaces (maximum %d)", MaxWorkspaces)
+	}
+	if len(c.Workspaces) == 0 {
+		path := c.Workspace
+		extras := append([]string(nil), c.AllowedRoots...)
+		if path == "" && len(extras) > 0 {
+			path = extras[0]
+			extras = extras[1:]
+		}
+		if path == "" {
+			defaultPath, err := DefaultWorkspacePath()
 			if err != nil {
 				return err
 			}
-			c.Workspace = ws
+			path = defaultPath
+		}
+		c.Workspaces = []WorkspaceConfig{{
+			ID:         DefaultWorkspaceID,
+			Name:       "default",
+			Path:       path,
+			ExtraRoots: extras,
+		}}
+		c.DefaultWorkspaceID = DefaultWorkspaceID
+	}
+
+	seen := make(map[string]bool, len(c.Workspaces))
+	seenPaths := make(map[string]string, len(c.Workspaces))
+	for i := range c.Workspaces {
+		w := &c.Workspaces[i]
+		if strings.TrimSpace(w.ID) == "" {
+			return fmt.Errorf("workspaces[%d].id is required", i)
+		}
+		if !validWorkspaceID(w.ID) {
+			return fmt.Errorf("workspace id %q must be 1-128 characters of letters, digits, dot, dash, or underscore", w.ID)
+		}
+		if seen[w.ID] {
+			return fmt.Errorf("duplicate workspace id %q", w.ID)
+		}
+		seen[w.ID] = true
+		if len(w.Name) > 128 {
+			return fmt.Errorf("workspace %q name is too long", w.ID)
+		}
+		normalized, err := NormalizeWorkspace(w.Path)
+		if err != nil {
+			return fmt.Errorf("workspace %q: %w (run termio workspace add)", w.ID, err)
+		}
+		w.Path = normalized
+		key := pathKey(normalized)
+		if other, exists := seenPaths[key]; exists {
+			return fmt.Errorf("workspaces %q and %q use the same path %q", other, w.ID, normalized)
+		}
+		seenPaths[key] = w.ID
+		extras, err := NormalizeRoots(w.ExtraRoots)
+		if err != nil {
+			return fmt.Errorf("workspace %q extra_roots: %w", w.ID, err)
+		}
+		w.ExtraRoots = DedupeRoots(w.Path, extras)
+	}
+
+	if c.DefaultWorkspaceID == "" {
+		c.DefaultWorkspaceID = c.Workspaces[0].ID
+	}
+	if !seen[c.DefaultWorkspaceID] {
+		return fmt.Errorf("default_workspace_id %q is not in workspaces", c.DefaultWorkspaceID)
+	}
+	c.Workspace = ""
+	c.AllowedRoots = nil
+	return nil
+}
+
+// WorkspaceByID returns a workspace definition by ID.
+func (c *Config) WorkspaceByID(id string) (WorkspaceConfig, bool) {
+	for _, w := range c.Workspaces {
+		if w.ID == id {
+			return w, true
 		}
 	}
-	workspace, err := NormalizeWorkspace(c.Workspace)
+	return WorkspaceConfig{}, false
+}
+
+// DefaultWorkspace returns the configured default workspace.
+func (c *Config) DefaultWorkspace() (WorkspaceConfig, bool) {
+	return c.WorkspaceByID(c.DefaultWorkspaceID)
+}
+
+// FindWorkspaceByPath returns the workspace whose path resolves to path.
+func (c *Config) FindWorkspaceByPath(path string) (WorkspaceConfig, bool) {
+	normalized, err := NormalizeWorkspace(path)
 	if err != nil {
-		return fmt.Errorf("workspace: %w (run termio init or set a valid workspace)", err)
+		return WorkspaceConfig{}, false
 	}
-	c.Workspace = workspace
-	roots, err := NormalizeRoots(c.AllowedRoots)
+	for _, w := range c.Workspaces {
+		if samePath(w.Path, normalized) {
+			return w, true
+		}
+	}
+	return WorkspaceConfig{}, false
+}
+
+// AddWorkspace appends a locally authorized workspace and returns it.
+func (c *Config) AddWorkspace(path, name, id string, extraRoots []string) (WorkspaceConfig, error) {
+	normalized, err := NormalizeWorkspace(path)
 	if err != nil {
-		return fmt.Errorf("allowed_roots: %w", err)
+		return WorkspaceConfig{}, err
 	}
-	c.AllowedRoots = DedupeRoots(c.Workspace, roots)
+	for _, w := range c.Workspaces {
+		if samePath(w.Path, normalized) {
+			return WorkspaceConfig{}, fmt.Errorf("path %q is already workspace %q", normalized, w.ID)
+		}
+	}
+	if id == "" {
+		id, err = GenerateWorkspaceID()
+		if err != nil {
+			return WorkspaceConfig{}, err
+		}
+	}
+	if !validWorkspaceID(id) {
+		return WorkspaceConfig{}, errors.New("workspace id must be 1-128 characters of letters, digits, dot, dash, or underscore")
+	}
+	if _, exists := c.WorkspaceByID(id); exists {
+		return WorkspaceConfig{}, fmt.Errorf("workspace id %q already exists", id)
+	}
+	if strings.TrimSpace(name) == "" {
+		name = filepath.Base(normalized)
+	}
+	if len(name) > 128 {
+		return WorkspaceConfig{}, errors.New("workspace name is too long")
+	}
+	extras, err := NormalizeRoots(extraRoots)
+	if err != nil {
+		return WorkspaceConfig{}, err
+	}
+	ws := WorkspaceConfig{
+		ID:         id,
+		Name:       name,
+		Path:       normalized,
+		ExtraRoots: DedupeRoots(normalized, extras),
+	}
+	c.Workspaces = append(c.Workspaces, ws)
+	if c.DefaultWorkspaceID == "" {
+		c.DefaultWorkspaceID = ws.ID
+	}
+	return ws, nil
+}
+
+// RemoveWorkspace removes a workspace. The last workspace cannot be removed.
+func (c *Config) RemoveWorkspace(id string) error {
+	if len(c.Workspaces) <= 1 {
+		return errors.New("cannot remove the last workspace")
+	}
+	index := -1
+	for i, w := range c.Workspaces {
+		if w.ID == id {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return fmt.Errorf("workspace %q not found", id)
+	}
+	c.Workspaces = append(c.Workspaces[:index], c.Workspaces[index+1:]...)
+	if c.DefaultWorkspaceID == id {
+		c.DefaultWorkspaceID = c.Workspaces[0].ID
+	}
 	return nil
+}
+
+// SetDefaultWorkspace selects the workspace used when a call omits workspaceId.
+func (c *Config) SetDefaultWorkspace(id string) error {
+	if _, ok := c.WorkspaceByID(id); !ok {
+		return fmt.Errorf("workspace %q not found", id)
+	}
+	c.DefaultWorkspaceID = id
+	return nil
+}
+
+// EffectiveRootsFor returns the workspace path plus its deduplicated extra roots.
+func (c *Config) EffectiveRootsFor(id string) ([]string, error) {
+	w, ok := c.WorkspaceByID(id)
+	if !ok {
+		return nil, fmt.Errorf("workspace %q not found", id)
+	}
+	out := make([]string, 0, 1+len(w.ExtraRoots))
+	out = append(out, w.Path)
+	out = append(out, DedupeRoots(w.Path, w.ExtraRoots)...)
+	return out, nil
+}
+
+// GenerateWorkspaceID returns ws_ followed by 16 random hex characters.
+func GenerateWorkspaceID() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate workspace id: %w", err)
+	}
+	return "ws_" + hex.EncodeToString(b[:]), nil
+}
+
+func validWorkspaceID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // LoadDefault loads the new default config, migrating the legacy
@@ -284,30 +491,52 @@ func (c *Config) Validate() error {
 	if err := validateGatewayURL(c.GatewayURL); err != nil {
 		return err
 	}
-	if strings.TrimSpace(c.Workspace) == "" {
-		return errors.New("workspace is required")
+	if len(c.Workspaces) == 0 {
+		return errors.New("at least one workspace is required")
 	}
-	if !filepath.IsAbs(c.Workspace) {
-		return fmt.Errorf("workspace %q must be absolute", c.Workspace)
+	if len(c.Workspaces) > MaxWorkspaces {
+		return fmt.Errorf("too many workspaces (maximum %d)", MaxWorkspaces)
 	}
-	info, err := os.Stat(c.Workspace)
-	if err != nil {
-		return fmt.Errorf("workspace %q: %w", c.Workspace, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("workspace %q is not a directory", c.Workspace)
-	}
-	for _, root := range c.AllowedRoots {
-		if !filepath.IsAbs(root) {
-			return fmt.Errorf("allowed root %q must be absolute", root)
+	seen := make(map[string]bool, len(c.Workspaces))
+	for _, w := range c.Workspaces {
+		if !validWorkspaceID(w.ID) {
+			return fmt.Errorf("workspace id %q must be 1-128 characters of letters, digits, dot, dash, or underscore", w.ID)
 		}
-		info, err := os.Stat(root)
+		if seen[w.ID] {
+			return fmt.Errorf("duplicate workspace id %q", w.ID)
+		}
+		seen[w.ID] = true
+		if len(w.Name) > 128 {
+			return fmt.Errorf("workspace %q name is too long", w.ID)
+		}
+		if !filepath.IsAbs(w.Path) {
+			return fmt.Errorf("workspace %q path must be absolute", w.ID)
+		}
+		info, err := os.Stat(w.Path)
 		if err != nil {
-			return fmt.Errorf("allowed root %q: %w", root, err)
+			return fmt.Errorf("workspace %q: %w", w.ID, err)
 		}
 		if !info.IsDir() {
-			return fmt.Errorf("allowed root %q is not a directory", root)
+			return fmt.Errorf("workspace %q is not a directory", w.ID)
 		}
+		for _, root := range w.ExtraRoots {
+			if !filepath.IsAbs(root) {
+				return fmt.Errorf("workspace %q extra root %q must be absolute", w.ID, root)
+			}
+			info, err := os.Stat(root)
+			if err != nil {
+				return fmt.Errorf("workspace %q extra root %q: %w", w.ID, root, err)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("workspace %q extra root %q is not a directory", w.ID, root)
+			}
+		}
+	}
+	if c.DefaultWorkspaceID == "" {
+		return errors.New("default_workspace_id is required")
+	}
+	if !seen[c.DefaultWorkspaceID] {
+		return fmt.Errorf("default_workspace_id %q is not in workspaces", c.DefaultWorkspaceID)
 	}
 	if c.MaxConcurrentCalls < 1 || c.MaxConcurrentCalls > MaxConcurrentCallsLimit {
 		return fmt.Errorf("max_concurrent_calls must be between 1 and %d", MaxConcurrentCallsLimit)
@@ -437,23 +666,6 @@ func DedupeRoots(workspace string, roots []string) []string {
 	return out
 }
 
-// EffectiveRoots returns the workspace followed by deduplicated extra roots.
-func (c *Config) EffectiveRoots() []string {
-	out := make([]string, 0, 1+len(c.AllowedRoots))
-	out = append(out, c.Workspace)
-	out = append(out, DedupeRoots(c.Workspace, c.AllowedRoots)...)
-	return out
-}
-
-// IsDefaultWorkspace reports whether the config uses the default app home.
-func (c *Config) IsDefaultWorkspace() bool {
-	def, err := DefaultWorkspacePath()
-	if err != nil {
-		return false
-	}
-	return samePath(c.Workspace, def)
-}
-
 // IsBroadWorkspace reports whether path is a filesystem root or the user's
 // home directory. The CLI warns about these because they grant broad access.
 func IsBroadWorkspace(path string) bool {
@@ -468,6 +680,14 @@ func IsBroadWorkspace(path string) bool {
 		return true
 	}
 	return false
+}
+
+func pathKey(p string) string {
+	p = filepath.Clean(p)
+	if runtime.GOOS == "windows" {
+		p = strings.ToLower(p)
+	}
+	return p
 }
 
 func samePath(a, b string) bool {
@@ -503,16 +723,9 @@ func ExpandHome(p string) (string, error) {
 // Save normalizes roots, validates, and atomically writes the config with
 // owner-only permissions on platforms that honor them.
 func (c *Config) Save(path string) error {
-	workspace, err := NormalizeWorkspace(c.Workspace)
-	if err != nil {
+	if err := c.normalizeWorkspaces(); err != nil {
 		return err
 	}
-	c.Workspace = workspace
-	roots, err := NormalizeRoots(c.AllowedRoots)
-	if err != nil {
-		return err
-	}
-	c.AllowedRoots = DedupeRoots(c.Workspace, roots)
 	if err := c.Validate(); err != nil {
 		return err
 	}

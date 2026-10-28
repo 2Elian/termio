@@ -13,11 +13,16 @@ func validConfig(t *testing.T) *Config {
 	t.Helper()
 	dir := t.TempDir()
 	return &Config{
-		GatewayURL:         "ws://127.0.0.1:8787/ws",
-		DeviceID:           "dev_0123456789abcdef0123456789abcdef",
-		DeviceName:         "test-device",
-		Token:              "test-token",
-		Workspace:          dir,
+		GatewayURL: "ws://127.0.0.1:8787/ws",
+		DeviceID:   "dev_0123456789abcdef0123456789abcdef",
+		DeviceName: "test-device",
+		Token:      "test-token",
+		Workspaces: []WorkspaceConfig{{
+			ID:   DefaultWorkspaceID,
+			Name: "default",
+			Path: dir,
+		}},
+		DefaultWorkspaceID: DefaultWorkspaceID,
 		MaxConcurrentCalls: 4,
 		CallTimeoutMS:      30000,
 		LogLevel:           "info",
@@ -42,11 +47,21 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if loaded.MaxConcurrentCalls != 4 || loaded.CallTimeoutMS != 30000 {
 		t.Fatalf("defaults did not round-trip: %+v", loaded)
 	}
-	if loaded.Workspace != cfg.Workspace || !filepath.IsAbs(loaded.Workspace) {
-		t.Fatalf("workspace = %q, want %q", loaded.Workspace, cfg.Workspace)
+	ws, ok := loaded.WorkspaceByID(DefaultWorkspaceID)
+	if !ok {
+		t.Fatalf("workspace missing: %+v", loaded)
 	}
-	if len(loaded.AllowedRoots) != 0 {
-		t.Fatalf("extra roots = %v, want none", loaded.AllowedRoots)
+	if ws.Path != cfg.Workspaces[0].Path || !filepath.IsAbs(ws.Path) {
+		t.Fatalf("workspace = %q, want %q", ws.Path, cfg.Workspaces[0].Path)
+	}
+	if len(ws.ExtraRoots) != 0 {
+		t.Fatalf("extra roots = %v, want none", ws.ExtraRoots)
+	}
+	if loaded.DefaultWorkspaceID != DefaultWorkspaceID {
+		t.Fatalf("default workspace = %q", loaded.DefaultWorkspaceID)
+	}
+	if loaded.Workspace != "" || len(loaded.AllowedRoots) != 0 {
+		t.Fatalf("legacy fields should be cleared: workspace=%q roots=%v", loaded.Workspace, loaded.AllowedRoots)
 	}
 
 	if runtime.GOOS != "windows" {
@@ -63,7 +78,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 func TestSaveDedupesWorkspaceFromExtras(t *testing.T) {
 	cfg := validConfig(t)
 	extra := t.TempDir()
-	cfg.AllowedRoots = []string{cfg.Workspace, extra, extra}
+	cfg.Workspaces[0].ExtraRoots = []string{cfg.Workspaces[0].Path, extra, extra}
 
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := cfg.Save(path); err != nil {
@@ -73,15 +88,56 @@ func TestSaveDedupesWorkspaceFromExtras(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.AllowedRoots) != 1 {
-		t.Fatalf("extra roots = %v, want one", loaded.AllowedRoots)
+	ws, ok := loaded.WorkspaceByID(DefaultWorkspaceID)
+	if !ok {
+		t.Fatal("workspace missing")
+	}
+	if len(ws.ExtraRoots) != 1 {
+		t.Fatalf("extra roots = %v, want one", ws.ExtraRoots)
 	}
 	wantExtra, err := filepath.EvalSymlinks(extra)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.AllowedRoots[0] != wantExtra {
-		t.Fatalf("extra root = %q, want %q", loaded.AllowedRoots[0], wantExtra)
+	if ws.ExtraRoots[0] != wantExtra {
+		t.Fatalf("extra root = %q, want %q", ws.ExtraRoots[0], wantExtra)
+	}
+}
+
+func TestMultipleWorkspacesRoundTrip(t *testing.T) {
+	cfg := validConfig(t)
+	second := t.TempDir()
+	ws, err := cfg.AddWorkspace(second, "second", "ws_second", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.SetDefaultWorkspace(ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Workspaces) != 2 {
+		t.Fatalf("workspaces = %+v", loaded.Workspaces)
+	}
+	if loaded.DefaultWorkspaceID != "ws_second" {
+		t.Fatalf("default = %q", loaded.DefaultWorkspaceID)
+	}
+	got, ok := loaded.WorkspaceByID("ws_second")
+	if !ok {
+		t.Fatal("second workspace missing")
+	}
+	want, err := filepath.EvalSymlinks(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Path != want {
+		t.Fatalf("path = %q, want %q", got.Path, want)
 	}
 }
 
@@ -136,11 +192,21 @@ func TestLoadAppliesDefaultsAndMigratesLegacyRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Workspace != wantWorkspace {
-		t.Fatalf("workspace = %q, want %q", cfg.Workspace, wantWorkspace)
+	if len(cfg.Workspaces) != 1 {
+		t.Fatalf("workspaces = %+v", cfg.Workspaces)
 	}
-	if len(cfg.AllowedRoots) != 1 || cfg.AllowedRoots[0] != wantExtra {
-		t.Fatalf("extras = %v, want [%s]", cfg.AllowedRoots, wantExtra)
+	ws := cfg.Workspaces[0]
+	if ws.ID != DefaultWorkspaceID || ws.Path != wantWorkspace {
+		t.Fatalf("workspace = %+v, want id %q path %q", ws, DefaultWorkspaceID, wantWorkspace)
+	}
+	if len(ws.ExtraRoots) != 1 || ws.ExtraRoots[0] != wantExtra {
+		t.Fatalf("extras = %v, want [%s]", ws.ExtraRoots, wantExtra)
+	}
+	if cfg.DefaultWorkspaceID != DefaultWorkspaceID {
+		t.Fatalf("default = %q", cfg.DefaultWorkspaceID)
+	}
+	if cfg.Workspace != "" || cfg.AllowedRoots != nil {
+		t.Fatalf("legacy fields should be cleared")
 	}
 }
 
@@ -157,18 +223,25 @@ func TestValidate(t *testing.T) {
 	}{
 		{"valid", func(c *Config) {}, false},
 		{"wss remote", func(c *Config) { c.GatewayURL = "wss://gateway.example.com/ws" }, false},
-		{"no extra roots", func(c *Config) { c.AllowedRoots = nil }, false},
+		{"no extra roots", func(c *Config) { c.Workspaces[0].ExtraRoots = nil }, false},
 		{"missing device id", func(c *Config) { c.DeviceID = "" }, true},
 		{"bad device id", func(c *Config) { c.DeviceID = "dev/bad" }, true},
 		{"device id with space", func(c *Config) { c.DeviceID = "dev bad" }, true},
 		{"missing token", func(c *Config) { c.Token = "  " }, true},
 		{"http scheme", func(c *Config) { c.GatewayURL = "http://example.com" }, true},
 		{"plain ws remote", func(c *Config) { c.GatewayURL = "ws://gateway.example.com/ws" }, true},
-		{"missing workspace", func(c *Config) { c.Workspace = "" }, true},
-		{"relative workspace", func(c *Config) { c.Workspace = "relative" }, true},
-		{"file workspace", func(c *Config) { c.Workspace = fileRoot }, true},
-		{"relative extra root", func(c *Config) { c.AllowedRoots = []string{"relative"} }, true},
-		{"file extra root", func(c *Config) { c.AllowedRoots = []string{fileRoot} }, true},
+		{"missing workspaces", func(c *Config) { c.Workspaces = nil }, true},
+		{"missing workspace id", func(c *Config) { c.Workspaces[0].ID = "" }, true},
+		{"bad workspace id", func(c *Config) { c.Workspaces[0].ID = "ws/bad" }, true},
+		{"duplicate workspace id", func(c *Config) {
+			c.Workspaces = append(c.Workspaces, c.Workspaces[0])
+		}, true},
+		{"relative workspace", func(c *Config) { c.Workspaces[0].Path = "relative" }, true},
+		{"file workspace", func(c *Config) { c.Workspaces[0].Path = fileRoot }, true},
+		{"missing default workspace", func(c *Config) { c.DefaultWorkspaceID = "" }, true},
+		{"default not registered", func(c *Config) { c.DefaultWorkspaceID = "ws_missing" }, true},
+		{"relative extra root", func(c *Config) { c.Workspaces[0].ExtraRoots = []string{"relative"} }, true},
+		{"file extra root", func(c *Config) { c.Workspaces[0].ExtraRoots = []string{fileRoot} }, true},
 		{"too much concurrency", func(c *Config) { c.MaxConcurrentCalls = MaxConcurrentCallsLimit + 1 }, true},
 		{"timeout too small", func(c *Config) { c.CallTimeoutMS = MinCallTimeoutMS - 1 }, true},
 		{"timeout too large", func(c *Config) { c.CallTimeoutMS = MaxCallTimeoutMS + 1 }, true},
@@ -193,13 +266,90 @@ func TestValidate(t *testing.T) {
 func TestEffectiveRootsDedupes(t *testing.T) {
 	cfg := validConfig(t)
 	extra := t.TempDir()
-	cfg.AllowedRoots = []string{cfg.Workspace, extra, extra}
-	roots := cfg.EffectiveRoots()
+	workspace := cfg.Workspaces[0].Path
+	cfg.Workspaces[0].ExtraRoots = []string{workspace, extra, extra}
+	roots, err := cfg.EffectiveRootsFor(DefaultWorkspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(roots) != 2 {
 		t.Fatalf("roots = %v, want workspace + one extra", roots)
 	}
-	if roots[0] != cfg.Workspace || roots[1] != filepath.Clean(extra) {
+	if roots[0] != workspace || roots[1] != filepath.Clean(extra) {
 		t.Fatalf("roots = %v", roots)
+	}
+	if _, err := cfg.EffectiveRootsFor("ws_missing"); err == nil {
+		t.Fatal("expected error for unknown workspace")
+	}
+}
+
+func TestWorkspaceRegistryOperations(t *testing.T) {
+	cfg := validConfig(t)
+	dirA := cfg.Workspaces[0].Path
+	dirB := t.TempDir()
+
+	if _, err := cfg.AddWorkspace(dirA, "", "", nil); err == nil {
+		t.Fatal("duplicate path should be rejected")
+	}
+	ws, err := cfg.AddWorkspace(dirB, "docs", "ws_docs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ws.ID != "ws_docs" || ws.Name != "docs" {
+		t.Fatalf("workspace = %+v", ws)
+	}
+	if _, err := cfg.AddWorkspace(t.TempDir(), "", "ws_docs", nil); err == nil {
+		t.Fatal("duplicate id should be rejected")
+	}
+	if _, ok := cfg.FindWorkspaceByPath(dirB); !ok {
+		t.Fatal("FindWorkspaceByPath failed")
+	}
+	if err := cfg.SetDefaultWorkspace("ws_docs"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.SetDefaultWorkspace("ws_missing"); err == nil {
+		t.Fatal("expected missing default error")
+	}
+	if err := cfg.RemoveWorkspace("ws_docs"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultWorkspaceID != DefaultWorkspaceID {
+		t.Fatalf("default after removal = %q", cfg.DefaultWorkspaceID)
+	}
+	if err := cfg.RemoveWorkspace(DefaultWorkspaceID); err == nil {
+		t.Fatal("cannot remove the last workspace")
+	}
+}
+
+func TestSaveRejectsDuplicateWorkspacePath(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.Workspaces = append(cfg.Workspaces, WorkspaceConfig{
+		ID:   "ws_same",
+		Path: cfg.Workspaces[0].Path,
+	})
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := cfg.Save(path); err == nil {
+		t.Fatal("expected duplicate path error")
+	}
+}
+
+func TestGenerateWorkspaceID(t *testing.T) {
+	id1, err := GenerateWorkspaceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := GenerateWorkspaceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(id1, "ws_") || len(id1) != len("ws_")+16 {
+		t.Fatalf("id = %q", id1)
+	}
+	if id1 == id2 {
+		t.Fatal("ids should be unique")
+	}
+	if !validWorkspaceID(id1) {
+		t.Fatalf("generated id is invalid: %q", id1)
 	}
 }
 
@@ -223,18 +373,24 @@ func TestLoadDefaultMigratesLegacyConfig(t *testing.T) {
 	}
 	workspace := t.TempDir()
 	legacyLog := LegacyDefaultLogPath()
-	cfg := &Config{
-		GatewayURL:         "ws://127.0.0.1:8787/ws",
-		DeviceID:           "dev_0123456789abcdef0123456789abcdef",
-		DeviceName:         "legacy",
-		Token:              "legacy-token",
-		Workspace:          workspace,
-		MaxConcurrentCalls: 4,
-		CallTimeoutMS:      30000,
-		LogLevel:           "info",
-		LogFile:            legacyLog,
+	data, err := json.Marshal(map[string]any{
+		"gateway_url":          "ws://127.0.0.1:8787/ws",
+		"device_id":            "dev_0123456789abcdef0123456789abcdef",
+		"device_name":          "legacy",
+		"token":                "legacy-token",
+		"workspace":            workspace,
+		"max_concurrent_calls": 4,
+		"call_timeout_ms":      30000,
+		"log_level":            "info",
+		"log_file":             legacyLog,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := cfg.Save(legacyPath); err != nil {
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -259,8 +415,9 @@ func TestLoadDefaultMigratesLegacyConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Workspace != wantWorkspace {
-		t.Fatalf("workspace = %q, want %q", got.Workspace, wantWorkspace)
+	ws, ok := got.WorkspaceByID(DefaultWorkspaceID)
+	if !ok || ws.Path != wantWorkspace {
+		t.Fatalf("workspace = %+v, want path %q", ws, wantWorkspace)
 	}
 	if got.LogFile != DefaultLogPath() {
 		t.Fatalf("log file = %q, want %q", got.LogFile, DefaultLogPath())
@@ -337,11 +494,17 @@ func TestNewDefaultUsesAppHome(t *testing.T) {
 	if err != nil {
 		t.Skipf("cannot build default config: %v", err)
 	}
-	if filepath.Base(cfg.Workspace) != DefaultHomeDirName {
-		t.Fatalf("workspace = %q", cfg.Workspace)
+	if len(cfg.Workspaces) != 1 {
+		t.Fatalf("workspaces = %+v", cfg.Workspaces)
 	}
-	if len(cfg.AllowedRoots) != 0 {
-		t.Fatalf("extra roots = %v", cfg.AllowedRoots)
+	if filepath.Base(cfg.Workspaces[0].Path) != DefaultHomeDirName {
+		t.Fatalf("workspace = %q", cfg.Workspaces[0].Path)
+	}
+	if cfg.Workspaces[0].ID != DefaultWorkspaceID || cfg.DefaultWorkspaceID != DefaultWorkspaceID {
+		t.Fatalf("workspace ids = %+v default = %q", cfg.Workspaces, cfg.DefaultWorkspaceID)
+	}
+	if len(cfg.Workspaces[0].ExtraRoots) != 0 {
+		t.Fatalf("extra roots = %v", cfg.Workspaces[0].ExtraRoots)
 	}
 }
 

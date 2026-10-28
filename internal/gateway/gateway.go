@@ -84,6 +84,7 @@ func New(opts Options) (*Server, error) {
 	mux.HandleFunc("GET /ws", s.handleWS)
 	mux.HandleFunc("GET /v1/devices", s.handleDevices)
 	mux.HandleFunc("GET /v1/devices/{id}/tools", s.handleTools)
+	mux.HandleFunc("GET /v1/devices/{id}/workspaces", s.handleWorkspaces)
 	mux.HandleFunc("POST /v1/devices/{id}/tools/call", s.handleCall)
 	s.handler = mux
 	return s, nil
@@ -142,12 +143,33 @@ func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
+	deviceID := r.PathValue("id")
+	if !s.tokenMatchesDevice(deviceID, bearerToken(r)) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	dc, ok := s.hub.get(deviceID)
+	if !ok {
+		writeError(w, http.StatusNotFound, protocol.CodeDeviceOffline, "device is not connected")
+		return
+	}
+	snap := dc.snapshot()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"device_id":            deviceID,
+		"workspaces":           snap.Workspaces,
+		"default_workspace_id": snap.DefaultWorkspaceID,
+	})
+}
+
 type callRequest struct {
 	Name          string          `json:"name"`
 	Arguments     json.RawMessage `json:"arguments,omitempty"`
 	TimeoutMS     int             `json:"timeout_ms,omitempty"`
 	CallID        string          `json:"call_id,omitempty"`
 	ProgressToken string          `json:"progress_token,omitempty"`
+	WorkspaceID   string          `json:"workspace_id,omitempty"`
+	SessionID     string          `json:"session_id,omitempty"`
 }
 
 func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +206,28 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	workspaceID := strings.TrimSpace(body.WorkspaceID)
+	if workspaceID == "" {
+		workspaceID = dc.defaultWorkspaceID
+	}
+	if workspaceID != "" {
+		if !validWorkspaceRef(workspaceID) {
+			writeError(w, http.StatusBadRequest, protocol.CodeInvalidParams, "workspace_id must be 1-128 characters of letters, digits, dot, dash, or underscore")
+			return
+		}
+		// Validate against the registration so an older daemon that ignores
+		// termio/workspaceId can never silently execute in its only workspace.
+		if !dc.hasWorkspace(workspaceID) {
+			writeError(w, http.StatusBadRequest, protocol.CodeUnknownWorkspace, "unknown workspace "+workspaceID)
+			return
+		}
+	}
+	sessionID := strings.TrimSpace(body.SessionID)
+	if !validSessionRef(sessionID) {
+		writeError(w, http.StatusBadRequest, protocol.CodeInvalidParams, "session_id must be at most 256 printable characters")
+		return
+	}
+
 	timeout := s.opts.CallTimeout
 	if body.TimeoutMS > 0 {
 		requested := time.Duration(body.TimeoutMS) * time.Millisecond
@@ -209,6 +253,8 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 		Meta: protocol.CallMeta{
 			CallID:        callID,
 			ProgressToken: body.ProgressToken,
+			WorkspaceID:   workspaceID,
+			SessionID:     sessionID,
 			TimeoutMS:     int(timeout / time.Millisecond),
 		},
 	})
@@ -227,20 +273,20 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 	elapsed := time.Since(started)
 	if err != nil {
 		if ctx.Err() != nil {
-			dc.notifyCancel(rpcID, callID, "client_cancelled")
+			dc.notifyCancel(rpcID, callID, workspaceID, sessionID, "client_cancelled")
 		}
 		switch {
 		case r.Context().Err() != nil:
 			// The cloud client went away; no one is listening for a response.
 			return
 		case errors.Is(err, context.DeadlineExceeded):
-			s.logCall(deviceID, body.Name, callID, http.StatusGatewayTimeout, elapsed)
+			s.logCall(deviceID, workspaceID, sessionID, body.Name, callID, http.StatusGatewayTimeout, elapsed)
 			writeError(w, http.StatusGatewayTimeout, protocol.CodeRequestTimeout, "device did not answer before the deadline")
 		case errors.Is(err, errDeviceClosed):
-			s.logCall(deviceID, body.Name, callID, http.StatusBadGateway, elapsed)
+			s.logCall(deviceID, workspaceID, sessionID, body.Name, callID, http.StatusBadGateway, elapsed)
 			writeError(w, http.StatusBadGateway, protocol.CodeDeviceOffline, "device disconnected")
 		default:
-			s.logCall(deviceID, body.Name, callID, http.StatusBadGateway, elapsed)
+			s.logCall(deviceID, workspaceID, sessionID, body.Name, callID, http.StatusBadGateway, elapsed)
 			writeError(w, http.StatusBadGateway, protocol.CodeInternalError, err.Error())
 		}
 		return
@@ -248,25 +294,27 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 
 	if resp.Error != nil {
 		status := httpStatusForCode(resp.Error.Code)
-		s.logCall(deviceID, body.Name, callID, status, elapsed)
+		s.logCall(deviceID, workspaceID, sessionID, body.Name, callID, status, elapsed)
 		writeError(w, status, resp.Error.Code, resp.Error.Message)
 		return
 	}
 	if len(resp.Result) == 0 {
-		s.logCall(deviceID, body.Name, callID, http.StatusBadGateway, elapsed)
+		s.logCall(deviceID, workspaceID, sessionID, body.Name, callID, http.StatusBadGateway, elapsed)
 		writeError(w, http.StatusBadGateway, protocol.CodeInternalError, "empty tool result")
 		return
 	}
 
-	s.logCall(deviceID, body.Name, callID, http.StatusOK, elapsed)
+	s.logCall(deviceID, workspaceID, sessionID, body.Name, callID, http.StatusOK, elapsed)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp.Result)
 }
 
-func (s *Server) logCall(deviceID, tool, callID string, status int, elapsed time.Duration) {
+func (s *Server) logCall(deviceID, workspaceID, sessionID, tool, callID string, status int, elapsed time.Duration) {
 	s.opts.Logger.Info("tool call",
 		"device_id", deviceID,
+		"workspace_id", workspaceID,
+		"session_id", sessionID,
 		"tool", tool,
 		"call_id", callID,
 		"status", status,
@@ -334,6 +382,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	workspaces, defaultWorkspaceID, err := normalizeWorkspaceRegistration(params.Workspaces, params.DefaultWorkspaceID)
+	if err != nil {
+		_ = writer.WriteJSON(context.Background(), protocol.NewErrorResponse(msg.ID, protocol.CodeInvalidParams, err.Error()))
+		_ = conn.Close(websocket.StatusPolicyViolation, "invalid workspace registration")
+		return
+	}
+
 	maxInflight := params.MaxInflight
 	if maxInflight < 1 {
 		maxInflight = 4
@@ -360,7 +415,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dc := newDeviceConn(deviceID, conn, writer, s.opts.Logger, params.Device, params.Tools, maxInflight, s.hub)
+	dc := newDeviceConn(deviceID, conn, writer, s.opts.Logger, params.Device, params.Tools, workspaces, defaultWorkspaceID, maxInflight, s.hub)
 	if old := s.hub.add(dc); old != nil {
 		s.opts.Logger.Info("replaced previous device session", "device_id", deviceID)
 	}
@@ -369,6 +424,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		"os", params.Device.OS,
 		"arch", params.Device.Arch,
 		"tools", len(params.Tools),
+		"workspaces", len(workspaces),
+		"default_workspace", defaultWorkspaceID,
 		"remote", r.RemoteAddr)
 
 	go dc.heartbeat(s.opts.HeartbeatInterval)
@@ -419,6 +476,58 @@ func constantTimeEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
+func normalizeWorkspaceRegistration(workspaces []protocol.WorkspaceInfo, defaultID string) ([]protocol.WorkspaceInfo, string, error) {
+	if len(workspaces) == 0 {
+		if defaultID != "" {
+			return nil, "", errors.New("default_workspace_id requires a workspace list")
+		}
+		return nil, "", nil
+	}
+	if len(workspaces) > 64 {
+		return nil, "", errors.New("too many workspaces (maximum 64)")
+	}
+	seen := make(map[string]bool, len(workspaces))
+	out := make([]protocol.WorkspaceInfo, 0, len(workspaces))
+	for i, ws := range workspaces {
+		id := strings.TrimSpace(ws.ID)
+		if !validCallID(id) {
+			return nil, "", fmt.Errorf("workspaces[%d].id must be 1-128 characters of letters, digits, dot, dash, or underscore", i)
+		}
+		if seen[id] {
+			return nil, "", fmt.Errorf("duplicate workspace id %q", id)
+		}
+		seen[id] = true
+		if len(ws.Name) > 128 {
+			return nil, "", fmt.Errorf("workspace %q name is too long", id)
+		}
+		out = append(out, protocol.WorkspaceInfo{ID: id, Name: ws.Name})
+	}
+	defaultID = strings.TrimSpace(defaultID)
+	if defaultID == "" {
+		defaultID = out[0].ID
+	}
+	if !seen[defaultID] {
+		return nil, "", fmt.Errorf("default_workspace_id %q is not registered", defaultID)
+	}
+	return out, defaultID, nil
+}
+
+func validWorkspaceRef(s string) bool {
+	return s != "" && validCallID(s)
+}
+
+func validSessionRef(s string) bool {
+	if len(s) > 256 {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func validCallID(s string) bool {
 	if s == "" || len(s) > 128 {
 		return false
@@ -435,7 +544,7 @@ func validCallID(s string) bool {
 
 func httpStatusForCode(code int) int {
 	switch code {
-	case protocol.CodeInvalidParams, protocol.CodeMethodNotFound:
+	case protocol.CodeInvalidParams, protocol.CodeMethodNotFound, protocol.CodeUnknownWorkspace:
 		return http.StatusBadRequest
 	case protocol.CodeRequestCancelled, protocol.CodeDuplicateCall:
 		return http.StatusConflict

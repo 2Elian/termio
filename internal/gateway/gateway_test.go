@@ -35,11 +35,28 @@ type e2eEnv struct {
 	cancel   context.CancelFunc
 }
 
+type e2eWorkspace struct {
+	ID       string
+	Name     string
+	Root     string
+	Registry *tools.Registry
+}
+
 func newLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 func startE2E(t *testing.T, registry *tools.Registry, callTimeoutMS int, root string) *e2eEnv {
+	t.Helper()
+	return startE2EMulti(t, callTimeoutMS, config.DefaultWorkspaceID, []e2eWorkspace{{
+		ID:       config.DefaultWorkspaceID,
+		Name:     "default",
+		Root:     root,
+		Registry: registry,
+	}})
+}
+
+func startE2EMulti(t *testing.T, callTimeoutMS int, defaultID string, workspaces []e2eWorkspace) *e2eEnv {
 	t.Helper()
 	gw, err := gateway.New(gateway.Options{
 		Token:             testToken,
@@ -57,16 +74,31 @@ func startE2E(t *testing.T, registry *tools.Registry, callTimeoutMS int, root st
 		DeviceID:           "dev_test",
 		DeviceName:         "test-device",
 		Token:              testToken,
-		Workspace:          root,
+		DefaultWorkspaceID: defaultID,
 		MaxConcurrentCalls: 4,
 		CallTimeoutMS:      callTimeoutMS,
 		LogLevel:           "info",
 	}
-	d := daemon.New(cfg, newLogger(), registry)
+	defs := make([]*daemon.Workspace, 0, len(workspaces))
+	for _, w := range workspaces {
+		cfg.Workspaces = append(cfg.Workspaces, config.WorkspaceConfig{ID: w.ID, Name: w.Name, Path: w.Root})
+		defs = append(defs, &daemon.Workspace{
+			ID:       w.ID,
+			Name:     w.Name,
+			Registry: w.Registry,
+			Sem:      make(chan struct{}, 1),
+		})
+	}
+	wsSet, err := daemon.NewWorkspaceSet(defaultID, defs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := daemon.New(cfg, newLogger(), wsSet)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Run(ctx) }()
 
+	root := workspaces[0].Root
 	env := &e2eEnv{
 		baseURL:  ts.URL,
 		deviceID: cfg.DeviceID,
@@ -134,6 +166,21 @@ func listDevices(baseURL string) ([]string, error) {
 
 func callTool(t *testing.T, env *e2eEnv, name string, args any, opts map[string]any) (*http.Response, protocol.CallToolResult) {
 	t.Helper()
+	status, raw := callToolRaw(t, env, name, args, opts)
+	resp := &http.Response{StatusCode: status, Body: io.NopCloser(bytes.NewReader(raw))}
+	var result protocol.CallToolResult
+	if status == http.StatusOK {
+		if err := json.Unmarshal(raw, &result); err != nil {
+			t.Fatalf("decode result: %v\n%s", err, raw)
+		}
+	}
+	return resp, result
+}
+
+// callToolRaw sends one call and returns the status and raw body. It closes
+// the response body before returning.
+func callToolRaw(t *testing.T, env *e2eEnv, name string, args any, opts map[string]any) (int, []byte) {
+	t.Helper()
 	body := map[string]any{"name": name, "arguments": args}
 	for k, v := range opts {
 		body[k] = v
@@ -157,13 +204,7 @@ func callTool(t *testing.T, env *e2eEnv, name string, args any, opts map[string]
 	if err != nil {
 		t.Fatal(err)
 	}
-	var result protocol.CallToolResult
-	if resp.StatusCode == http.StatusOK {
-		if err := json.Unmarshal(raw, &result); err != nil {
-			t.Fatalf("decode result: %v\n%s", err, raw)
-		}
-	}
-	return resp, result
+	return resp.StatusCode, raw
 }
 
 func writeFiles(t *testing.T, root string, files map[string]string) {
@@ -303,6 +344,282 @@ func TestE2EDuplicateCallIDReplaysCache(t *testing.T) {
 	}
 }
 
+func newTestRegistry(t *testing.T, root string) *tools.Registry {
+	t.Helper()
+	sb, err := tools.NewSandbox(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sb.Close() })
+	return tools.DefaultRegistry(sb)
+}
+
+func callErrorCode(t *testing.T, raw []byte) int {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode error body: %v\n%s", err, raw)
+	}
+	return body.Error.Code
+}
+
+func TestE2EWorkspaceRoutingAndIsolation(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	writeFiles(t, rootA, map[string]string{"a.txt": "alpha"})
+	writeFiles(t, rootB, map[string]string{"b.txt": "beta"})
+	env := startE2EMulti(t, 5000, "ws_a", []e2eWorkspace{
+		{ID: "ws_a", Name: "A", Root: rootA, Registry: newTestRegistry(t, rootA)},
+		{ID: "ws_b", Name: "B", Root: rootB, Registry: newTestRegistry(t, rootB)},
+	})
+
+	// No workspace_id: the gateway fills in the device's default workspace.
+	_, result := callTool(t, env, "system_info", map[string]any{}, nil)
+	if result.IsError {
+		t.Fatalf("system_info failed: %+v", result)
+	}
+	if result.Meta.WorkspaceID != "ws_a" {
+		t.Fatalf("default workspace meta = %q, want ws_a", result.Meta.WorkspaceID)
+	}
+	structured, _ := json.Marshal(result.StructuredContent)
+	var info struct {
+		Workspace string `json:"workspace"`
+	}
+	if err := json.Unmarshal(structured, &info); err != nil {
+		t.Fatal(err)
+	}
+	wantA, _ := filepath.EvalSymlinks(rootA)
+	if !strings.EqualFold(filepath.Clean(info.Workspace), filepath.Clean(wantA)) {
+		t.Fatalf("system_info workspace = %q, want %q", info.Workspace, wantA)
+	}
+
+	_, result = callTool(t, env, "search_files", map[string]any{"pattern": "*.txt"}, map[string]any{
+		"workspace_id": "ws_b",
+		"session_id":   "chat-b",
+	})
+	if result.IsError {
+		t.Fatalf("search in B failed: %+v", result)
+	}
+	if result.Meta.WorkspaceID != "ws_b" || result.Meta.SessionID != "chat-b" {
+		t.Fatalf("result meta = %+v", result.Meta)
+	}
+	structured, _ = json.Marshal(result.StructuredContent)
+	if !strings.Contains(string(structured), "b.txt") || strings.Contains(string(structured), "a.txt") {
+		t.Fatalf("search results crossed workspaces: %s", structured)
+	}
+
+	// Relative paths resolve inside the selected workspace.
+	_, result = callTool(t, env, "read_file", map[string]any{"path": "b.txt"}, map[string]any{"workspace_id": "ws_b"})
+	if result.IsError || len(result.Content) == 0 || result.Content[0].Text != "beta" {
+		t.Fatalf("read_file in B = %+v", result)
+	}
+	_, result = callTool(t, env, "read_file", map[string]any{"path": "b.txt"}, map[string]any{"workspace_id": "ws_a"})
+	if !result.IsError {
+		t.Fatal("reading B's file from workspace A should fail")
+	}
+
+	status, raw := callToolRaw(t, env, "system_info", map[string]any{}, map[string]any{"workspace_id": "ws_missing"})
+	if status != http.StatusBadRequest {
+		t.Fatalf("unknown workspace status = %d, body = %s", status, raw)
+	}
+	if code := callErrorCode(t, raw); code != protocol.CodeUnknownWorkspace {
+		t.Fatalf("unknown workspace code = %d, want %d", code, protocol.CodeUnknownWorkspace)
+	}
+}
+
+func TestE2ECallIDScopedByWorkspaceAndSession(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	writeFiles(t, rootA, map[string]string{"a.txt": "alpha"})
+	writeFiles(t, rootB, map[string]string{"b.txt": "beta"})
+	env := startE2EMulti(t, 5000, "ws_a", []e2eWorkspace{
+		{ID: "ws_a", Name: "A", Root: rootA, Registry: newTestRegistry(t, rootA)},
+		{ID: "ws_b", Name: "B", Root: rootB, Registry: newTestRegistry(t, rootB)},
+	})
+
+	args := map[string]any{"pattern": "*.txt"}
+	opts := map[string]any{"call_id": "same-call", "workspace_id": "ws_a", "session_id": "s1"}
+	_, first := callTool(t, env, "search_files", args, opts)
+	if first.IsError {
+		t.Fatalf("first call: %+v", first)
+	}
+
+	// Same call id, different workspace: must execute against B, not replay A.
+	optsB := map[string]any{"call_id": "same-call", "workspace_id": "ws_b", "session_id": "s1"}
+	_, second := callTool(t, env, "search_files", args, optsB)
+	if second.IsError {
+		t.Fatalf("second call: %+v", second)
+	}
+	structured, _ := json.Marshal(second.StructuredContent)
+	if !strings.Contains(string(structured), "b.txt") || strings.Contains(string(structured), "a.txt") {
+		t.Fatalf("workspace B replayed workspace A's cache: %s", structured)
+	}
+
+	// Same call id and workspace, different session: independent execution.
+	if err := os.Remove(filepath.Join(rootA, "a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	optsS2 := map[string]any{"call_id": "same-call", "workspace_id": "ws_a", "session_id": "s2"}
+	_, third := callTool(t, env, "search_files", args, optsS2)
+	if third.IsError {
+		t.Fatalf("third call: %+v", third)
+	}
+	structured, _ = json.Marshal(third.StructuredContent)
+	if strings.Contains(string(structured), "a.txt") {
+		t.Fatalf("session s2 replayed session s1's cache: %s", structured)
+	}
+
+	// Retrying the original key still replays the original result.
+	_, replay := callTool(t, env, "search_files", args, opts)
+	structured, _ = json.Marshal(replay.StructuredContent)
+	if !strings.Contains(string(structured), "a.txt") {
+		t.Fatalf("original call id did not replay: %s", structured)
+	}
+}
+
+type gateTool struct {
+	name    string
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *gateTool) Spec() protocol.ToolSpec {
+	return protocol.ToolSpec{
+		Name:        g.name,
+		Description: "blocks until released",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+	}
+}
+
+func (g *gateTool) Call(ctx context.Context, _ json.RawMessage, _ tools.ProgressFunc) (protocol.CallToolResult, error) {
+	g.once.Do(func() { close(g.started) })
+	select {
+	case <-g.release:
+		return protocol.CallToolResult{
+			Content: []protocol.ContentBlock{{Type: "text", Text: g.name + " done"}},
+		}, nil
+	case <-ctx.Done():
+		return protocol.CallToolResult{}, ctx.Err()
+	}
+}
+
+func TestE2EWorkspacesExecuteConcurrently(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	toolA := &gateTool{name: "gate_a", started: make(chan struct{}), release: make(chan struct{})}
+	toolB := &gateTool{name: "gate_b", started: make(chan struct{}), release: make(chan struct{})}
+	env := startE2EMulti(t, 5000, "ws_a", []e2eWorkspace{
+		{ID: "ws_a", Name: "A", Root: rootA, Registry: tools.NewRegistry(toolA)},
+		{ID: "ws_b", Name: "B", Root: rootB, Registry: tools.NewRegistry(toolB)},
+	})
+
+	type outcome struct {
+		status int
+		result protocol.CallToolResult
+		err    error
+	}
+	results := make(chan outcome, 2)
+	start := func(workspaceID, tool string) {
+		go func() {
+			body, _ := json.Marshal(map[string]any{
+				"name":         tool,
+				"arguments":    map[string]any{},
+				"workspace_id": workspaceID,
+				"timeout_ms":   5000,
+			})
+			req, err := http.NewRequest(http.MethodPost, env.baseURL+"/v1/devices/"+env.deviceID+"/tools/call", bytes.NewReader(body))
+			if err != nil {
+				results <- outcome{err: err}
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+testToken)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				results <- outcome{err: err}
+				return
+			}
+			defer resp.Body.Close()
+			raw, err := io.ReadAll(resp.Body)
+			var result protocol.CallToolResult
+			if err == nil && resp.StatusCode == http.StatusOK {
+				err = json.Unmarshal(raw, &result)
+			}
+			results <- outcome{status: resp.StatusCode, result: result, err: err}
+		}()
+	}
+	start("ws_a", "gate_a")
+	start("ws_b", "gate_b")
+
+	// Each workspace allows one in-flight call in this test. Both starting at
+	// the same time proves the semaphores are per workspace, not global.
+	for name, ch := range map[string]<-chan struct{}{"A": toolA.started, "B": toolB.started} {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("workspace %s call did not start while the other was running", name)
+		}
+	}
+	close(toolA.release)
+	close(toolB.release)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case got := <-results:
+			if got.err != nil {
+				t.Fatal(got.err)
+			}
+			if got.status != http.StatusOK || got.result.IsError {
+				t.Fatalf("call failed: status=%d result=%+v", got.status, got.result)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("concurrent calls did not complete")
+		}
+	}
+}
+
+func TestE2EWorkspacesEndpoint(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	env := startE2EMulti(t, 5000, "ws_b", []e2eWorkspace{
+		{ID: "ws_a", Name: "A", Root: rootA, Registry: newTestRegistry(t, rootA)},
+		{ID: "ws_b", Name: "B", Root: rootB, Registry: newTestRegistry(t, rootB)},
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, env.baseURL+"/v1/devices/"+env.deviceID+"/workspaces", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var body struct {
+		DeviceID           string                   `json:"device_id"`
+		Workspaces         []protocol.WorkspaceInfo `json:"workspaces"`
+		DefaultWorkspaceID string                   `json:"default_workspace_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.DeviceID != env.deviceID || body.DefaultWorkspaceID != "ws_b" {
+		t.Fatalf("body = %+v", body)
+	}
+	if len(body.Workspaces) != 2 || body.Workspaces[0].ID != "ws_a" || body.Workspaces[1].ID != "ws_b" {
+		t.Fatalf("workspaces = %+v", body.Workspaces)
+	}
+	if strings.Contains(fmt.Sprint(body), rootA) || strings.Contains(fmt.Sprint(body), rootB) {
+		t.Fatalf("workspace paths must stay local: %+v", body)
+	}
+}
+
 type slowTool struct {
 	cancelled chan struct{}
 	once      sync.Once
@@ -437,7 +754,12 @@ func TestE2EFakeDeviceManualProtocol(t *testing.T) {
 			Description: "Echo",
 			InputSchema: json.RawMessage(`{"type":"object"}`),
 		}},
-		MaxInflight: 4,
+		Workspaces: []protocol.WorkspaceInfo{
+			{ID: "ws_docs", Name: "docs"},
+			{ID: "ws_code", Name: "code"},
+		},
+		DefaultWorkspaceID: "ws_docs",
+		MaxInflight:        4,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -505,6 +827,9 @@ func TestE2EFakeDeviceManualProtocol(t *testing.T) {
 	if params.Name != "echo" || params.Meta.CallID != "fake-call-1" {
 		t.Fatalf("unexpected params: %+v", params)
 	}
+	if params.Meta.WorkspaceID != "ws_docs" {
+		t.Fatalf("gateway did not inject the default workspace: %+v", params.Meta)
+	}
 
 	progress, err := protocol.NewNotification(protocol.MethodProgress, protocol.ProgressParams{
 		Progress: 1,
@@ -549,6 +874,72 @@ func TestE2EFakeDeviceManualProtocol(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("HTTP call did not complete")
+	}
+}
+
+func TestGatewayRejectsWorkspaceForLegacyDevice(t *testing.T) {
+	gw, err := gateway.New(gateway.Options{
+		Token:             testToken,
+		Logger:            newLogger(),
+		HeartbeatInterval: 5 * time.Second,
+		CallTimeout:       2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+	defer gw.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+testToken)
+	header.Set("X-Termio-Device", "dev_legacy")
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", &websocket.DialOptions{HTTPHeader: header})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	reg, err := protocol.NewRequest("reg-legacy", protocol.MethodRegister, protocol.RegisterParams{
+		ProtocolVersion: protocol.ProtocolVersion,
+		Device:          protocol.DeviceInfo{ID: "dev_legacy", OS: "test", Arch: "test", Version: "0"},
+		Tools: []protocol.ToolSpec{{
+			Name:        "echo",
+			Description: "Echo",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regData, _ := json.Marshal(reg)
+	if err := conn.Write(ctx, websocket.MessageText, regData); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := conn.Read(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitForDevice(t, ts.URL, "dev_legacy", 2*time.Second)
+
+	// A legacy device registers no workspaces. A workspace-scoped call must be
+	// rejected instead of silently running in its sole workspace.
+	body := []byte(`{"name":"echo","arguments":{},"workspace_id":"ws_docs"}`)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/devices/dev_legacy/tools/call", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, raw)
+	}
+	if code := callErrorCode(t, raw); code != protocol.CodeUnknownWorkspace {
+		t.Fatalf("code = %d, want %d", code, protocol.CodeUnknownWorkspace)
 	}
 }
 

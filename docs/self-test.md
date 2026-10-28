@@ -23,6 +23,15 @@ termio run
 
 默认工作区是 `~/.lares`，配置在 `~/.lares/.termio/config.json`。
 
+再注册一个本地工作区，用于测试跨工作区路由（需重启 daemon）：
+
+```bash
+mkdir -p "$HOME/termio-docs"
+termio workspace add --id ws_docs --name docs "$HOME/termio-docs"
+termio workspace list
+# 重启 termio run / VS Code 调试配置
+```
+
 方式 B：调试配置（VS Code）
 
 ```bash
@@ -42,6 +51,7 @@ go run ./cmd/termioctl --gateway http://127.0.0.1:8787 --token dev-token
 
 - 不传 `--device` 时自动使用第一台在线设备；也可以用 `--device dev_debug` 指定。
 - 不传 `--token` 时依次读取 `TERMIO_TOKEN`、`dev-token`。
+- `--workspace ws_docs` 设置 REPL 的默认工作区；`--session chat-1` 设置会话 ID。
 - 如果 stdin 不是 TTY（例如管道），默认按行读取 JSON；要强制 REPL 加 `--interactive`。
 
 启动后直接输入 JSON，每行一个对象：
@@ -66,16 +76,26 @@ go run ./cmd/termioctl --gateway http://127.0.0.1:8787 --token dev-token
 {"name":"read_file","arguments":{"path":".termio/config.json"}}
 ```
 
+```json
+{"name":"system_info","arguments":{},"workspace_id":"ws_docs","session_id":"chat-42"}
+```
+
+```json
+{"name":"read_file","arguments":{"path":"notes.md"},"workspace_id":"ws_docs","session_id":"chat-42"}
+```
+
 预期：
 
 - 前三个正常返回 `CallToolResult`。
 - `../outside` 返回 `relative path escapes the workspace`（或越界错误）。
 - `.termio/config.json` 返回 `path is reserved for Termio`，HTTP 仍是 200 + `isError: true`。
+- 带 `workspace_id` 的调用在对应工作区执行；结果的 `_meta` 会带回 `termio/workspaceId` 和 `termio/sessionId`。
+- 未知 `workspace_id` 返回 HTTP 400 + `-32012`。
 
 也支持 JSON-RPC 形状的 envelope：
 
 ```json
-{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"system_info","arguments":{}}}
+{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"system_info","arguments":{},"_meta":{"termio/workspaceId":"ws_docs","termio/sessionId":"chat-42"}}}
 ```
 
 ## 4. REPL 命令
@@ -86,6 +106,9 @@ go run ./cmd/termioctl --gateway http://127.0.0.1:8787 --token dev-token
 | `:devices` | 列出在线设备 |
 | `:device <id>` | 切换设备 |
 | `:tools` | 查看当前设备的工具 |
+| `:workspaces` | 查看当前设备已注册的工作区 |
+| `:workspace <id>` | 切换当前工作区；`:workspace -` 回到设备默认 |
+| `:session <id>` | 设置会话 ID；`:session -` 清除 |
 | `:health` | 网关健康检查 |
 | `:timeout <ms>` | 设置默认工具超时 |
 | `:quit` | 退出 |
@@ -102,6 +125,10 @@ go run ./cmd/termioctl --gateway http://127.0.0.1:8787 --token dev-token
 # 单次调用
 ./bin/termioctl --device dev_debug \
   --json '{"name":"system_info","arguments":{}}'
+
+# 指定工作区和会话
+./bin/termioctl --device dev_debug --workspace ws_docs --session chat-42 \
+  --json '{"name":"read_file","arguments":{"path":"notes.md"}}'
 
 # 管道：每行一个 JSON；有失败时退出码非 0
 printf '%s\n%s\n' \
@@ -120,13 +147,20 @@ printf '%s\n%s\n' \
 
 再发一次相同请求。第二次应该命中地端缓存并直接返回，不会重新执行。修改 `arguments` 但复用同一 `call_id` 会返回参数错误（callId 冲突）。
 
+幂等键是 `(workspace_id, session_id, call_id)`：
+
+- 同一个 `call_id` 在 `ws_default` 和 `ws_docs` 是两个独立调用，都会真正执行。
+- 同一工作区、不同 `session_id` 也互不重放。
+- 只有三元组完全一致时才会重放缓存。
+
 ## 7. Postman
 
 导入 [`docs/postman/termio.postman_collection.json`](postman/termio.postman_collection.json)：
 
 1. 设置 `baseUrl` = `http://127.0.0.1:8787`，`token` = 网关 token。
-2. 先跑 **List devices (run first)**，测试脚本会自动写入 `deviceId`。
-3. 依次跑 Search files / Read file / System info / Outside allowed root / Unknown tool / Missing auth。
+2. 先跑 **List devices (run first)**，测试脚本会自动写入 `deviceId`、默认 `workspaceId`，并在有第二个工作区时写入 `otherWorkspaceId`。
+3. 跑 **List workspaces** 查看全部已注册工作区。
+4. 依次跑 Search files / Read file / System info / Workspace call / Unknown workspace / Outside allowed root / Unknown tool / Missing auth。
 
 Postman 也可以扮演假设备，手动接收网关推送的 `tools/call` 并回复：
 
@@ -145,6 +179,7 @@ X-Termio-Device: dev_postman
 | `no online devices` | daemon 没启动，或网关 URL/token 不对；先看网关 `/v1/devices` |
 | 401 | token 与网关 `--token`/`--devices-file` 不一致 |
 | 404 | `deviceId` 不存在或设备已断开 |
+| 400 + `-32012` | `workspaceId` 未注册；`termio workspace list` 检查，新增后重启 daemon |
 | `path is reserved for Termio` | 正常：`.termio` 是端子私有目录，工具不能访问 |
 | 工具返回 `isError: true` | 工具执行失败；看 `content[0].text`，不是网络错误 |
 | 超时 | 加大 `--timeout`/`:timeout`，或检查工具是否忽略 ctx |

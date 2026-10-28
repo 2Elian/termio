@@ -28,7 +28,7 @@ HTTP API 使用同样的 Bearer token。
 
 | 方向 | 方法 | 说明 |
 |---|---|---|
-| 地端 → 网关 | `termio/register` | 首帧：协议版本、设备信息、工具列表 |
+| 地端 → 网关 | `termio/register` | 首帧：协议版本、设备信息、工具列表、工作区列表 |
 | 网关 → 地端 | `tools/list` | 返回当前工具定义 |
 | 网关 → 地端 | `tools/call` | 执行工具 |
 | 地端 → 网关 | `notifications/progress` | 执行进度（best effort） |
@@ -61,10 +61,19 @@ HTTP API 使用同样的 Bearer token。
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
       }
     ],
+    "workspaces": [
+      {"id": "ws_default", "name": "default"},
+      {"id": "ws_docs", "name": "docs"}
+    ],
+    "default_workspace_id": "ws_default",
     "max_inflight": 4
   }
 }
 ```
+
+- `workspaces` 只报告 `id` 和展示名；本地路径永远不上报。
+- `default_workspace_id` 省略时网关取列表第一项；有工作区列表但默认值不在列表中时注册失败。
+- 工作区 ID 必须唯一，最多 64 个；旧地端可以不发送这两个字段，此时所有调用落到地端的本地默认工作区。
 
 响应：
 
@@ -118,6 +127,8 @@ HTTP API 使用同样的 Bearer token。
     "_meta": {
       "progressToken": "optional-cloud-token",
       "termio/callId": "call_7a3c...",
+      "termio/workspaceId": "ws_docs",
+      "termio/sessionId": "chat-42",
       "termio/timeoutMs": 30000
     }
   }
@@ -126,6 +137,8 @@ HTTP API 使用同样的 Bearer token。
 
 - JSON-RPC `id` 是**逐跳**的，由网关生成，只用于这条连接上的请求/响应配对。
 - `_meta["termio/callId"]` 是**端到端幂等键**，跨重连和 HTTP 重试保持不变。
+- `_meta["termio/workspaceId"]` 选择本地已注册的工作区；省略时使用默认工作区。未知 ID 返回 `-32012`。
+- `_meta["termio/sessionId"]` 标识云端会话/任务；一个工作区可以同时服务多个会话。它只是上下文标签，不参与鉴权。
 - `_meta["termio/timeoutMs"]` 是相对毫秒数；地端会把它限制在 1 秒到 5 分钟之间，并与自身配置的 `call_timeout_ms` 取较小值。
 - `progressToken` 可省略；进度通知会原样回传。
 
@@ -139,7 +152,11 @@ HTTP API 使用同样的 Bearer token。
     "content": [{"type": "text", "text": "Found 2 matching file(s) ..."}],
     "structuredContent": {"matches": [], "truncated": false},
     "isError": false,
-    "_meta": {"termio/callId": "call_7a3c..."}
+    "_meta": {
+      "termio/callId": "call_7a3c...",
+      "termio/workspaceId": "ws_docs",
+      "termio/sessionId": "chat-42"
+    }
   }
 }
 ```
@@ -171,7 +188,11 @@ HTTP API 使用同样的 Bearer token。
     "progress": 512,
     "total": 0,
     "message": "scanned 512 entries",
-    "_meta": {"termio/callId": "call_7a3c..."}
+    "_meta": {
+      "termio/callId": "call_7a3c...",
+      "termio/workspaceId": "ws_docs",
+      "termio/sessionId": "chat-42"
+    }
   }
 }
 ```
@@ -190,21 +211,27 @@ HTTP API 使用同样的 Bearer token。
   "params": {
     "requestId": "g_9c1f...",
     "reason": "client_cancelled",
-    "_meta": {"termio/callId": "call_7a3c..."}
+    "_meta": {
+      "termio/callId": "call_7a3c...",
+      "termio/workspaceId": "ws_docs",
+      "termio/sessionId": "chat-42"
+    }
   }
 }
 ```
 
 - `requestId` 是网关侧的 JSON-RPC id；地端优先用它定位正在执行的调用。
+- 没有 `requestId` 时，地端用 `(workspaceId, sessionId, callId)` 组合定位；省略 `workspaceId` 时使用默认工作区。
 - 地端取消 context，并返回错误码 `-32800`。
 - 幂等：调用已完成、已取消或不存在时忽略。
 - 云端 HTTP 客户端断开、或网关等待超时时，网关会自动发送取消。
 
 ## 幂等与重试
 
-- 地端按 `callId` 缓存最终结果 10 分钟，最多 1024 条。
-- 相同 `callId` + 相同工具/参数：已完成则重放；执行中返回 `-32005`。
-- 相同 `callId` + 不同工具/参数：返回 `-32602`。
+- 地端按 `(workspaceId, sessionId, callId)` 缓存最终结果 10 分钟，最多 1024 条。
+- 相同键 + 相同工具/参数：已完成则重放；执行中返回 `-32005`。
+- 相同键 + 不同工具/参数：返回 `-32602`。
+- 同一个 `callId` 在不同工作区或不同会话中是独立调用，不会互相重放。
 - 缓存是内存态，地端重启后丢失。
 - 语义是 **at-least-once + 去重窗口**，不是 exactly-once。
 - 取消、终止、内部错误不缓存；工具超时会作为 `isError` 结果缓存。
@@ -314,6 +341,7 @@ sequenceDiagram
 | `-32005` | 同一 callId 正在执行 | 409 |
 | `-32010` | 地端并发已满 | 429 |
 | `-32011` | 设备不在线 / 连接断开 | 404 / 502 |
+| `-32012` | 工作区不存在 | 400 |
 | `-32020` | 协议版本不支持 | 502（注册阶段直接关闭） |
 
 ## WebSocket 关闭码
@@ -350,15 +378,37 @@ sequenceDiagram
       "arch": "amd64",
       "version": "0.1.0",
       "connected_at": "2026-10-22T12:00:00Z",
-      "tools": [{"name": "search_files", "description": "...", "inputSchema": {}}]
+      "tools": [{"name": "search_files", "description": "...", "inputSchema": {}}],
+      "workspaces": [
+        {"id": "ws_default", "name": "default"},
+        {"id": "ws_docs", "name": "docs"}
+      ],
+      "default_workspace_id": "ws_default"
     }
   ]
 }
 ```
 
+`workspaces` 只含 ID/名称，不含本地路径。
+
 ### `GET /v1/devices/{id}/tools`
 
 返回该设备的工具列表。设备不在线返回 404。
+
+### `GET /v1/devices/{id}/workspaces`
+
+返回该设备已注册的工作区元数据和默认工作区。设备不在线返回 404。
+
+```json
+{
+  "device_id": "dev_...",
+  "workspaces": [
+    {"id": "ws_default", "name": "default"},
+    {"id": "ws_docs", "name": "docs"}
+  ],
+  "default_workspace_id": "ws_default"
+}
+```
 
 ### `POST /v1/devices/{id}/tools/call`
 
@@ -370,12 +420,16 @@ sequenceDiagram
   "arguments": {"pattern": "*.go"},
   "timeout_ms": 30000,
   "call_id": "optional-stable-id",
-  "progress_token": "optional-cloud-token"
+  "progress_token": "optional-cloud-token",
+  "workspace_id": "ws_docs",
+  "session_id": "chat-42"
 }
 ```
 
 - `name` 必填；`arguments` 省略时视为 `{}`。
 - `call_id` 省略时网关生成 `call_<hex>`；重试时应复用。
+- `workspace_id` 省略时网关填入设备的默认工作区 ID；网关按注册列表校验，未知 ID 返回 HTTP 400 + `-32012`，不会转发给地端（旧地端未上报工作区时也会被拒绝，避免静默落到其唯一工作区）。
+- `session_id` 可选，最多 256 个可打印字符；用于云端关联会话，不参与鉴权。
 - `timeout_ms` 会与网关配置的 `call_timeout` 取较小值，并限制在 1 秒到 5 分钟。
 - 请求体上限 1 MiB。
 
@@ -397,7 +451,7 @@ HTTP 状态映射见错误码表。网关等待 `timeout + 2s`，让地端自己
 | `search_files` 结果 | 1000 条 |
 | 搜索 pattern | 256 字节 |
 | 请求路径 | 4096 字节 |
-| 单设备并发 | 配置 1–32，默认 4 |
+| 每工作区并发 | 配置 1–32，默认 4（工作区之间独立） |
 | 调用超时 | 1s–5min，默认 30s |
 | 幂等缓存 | 10 分钟 / 1024 条 |
 | 进度频率 | 每调用最多 4 次/秒 |

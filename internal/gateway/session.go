@@ -67,25 +67,29 @@ func (h *hub) snapshot() []*deviceConn {
 }
 
 type deviceSnapshot struct {
-	ID          string              `json:"id"`
-	Name        string              `json:"name,omitempty"`
-	OS          string              `json:"os"`
-	Arch        string              `json:"arch"`
-	Version     string              `json:"version"`
-	ConnectedAt time.Time           `json:"connected_at"`
-	Tools       []protocol.ToolSpec `json:"tools"`
+	ID                 string                   `json:"id"`
+	Name               string                   `json:"name,omitempty"`
+	OS                 string                   `json:"os"`
+	Arch               string                   `json:"arch"`
+	Version            string                   `json:"version"`
+	ConnectedAt        time.Time                `json:"connected_at"`
+	Tools              []protocol.ToolSpec      `json:"tools"`
+	Workspaces         []protocol.WorkspaceInfo `json:"workspaces"`
+	DefaultWorkspaceID string                   `json:"default_workspace_id,omitempty"`
 }
 
 type deviceConn struct {
-	id          string
-	conn        *websocket.Conn
-	writer      *wsx.Writer
-	log         *slog.Logger
-	info        protocol.DeviceInfo
-	tools       []protocol.ToolSpec
-	maxInflight int
-	connectedAt time.Time
-	hub         *hub
+	id                 string
+	conn               *websocket.Conn
+	writer             *wsx.Writer
+	log                *slog.Logger
+	info               protocol.DeviceInfo
+	tools              []protocol.ToolSpec
+	workspaces         []protocol.WorkspaceInfo
+	defaultWorkspaceID string
+	maxInflight        int
+	connectedAt        time.Time
+	hub                *hub
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -94,31 +98,47 @@ type deviceConn struct {
 	pending map[string]chan rpcResult
 }
 
-func newDeviceConn(id string, conn *websocket.Conn, writer *wsx.Writer, log *slog.Logger, info protocol.DeviceInfo, tools []protocol.ToolSpec, maxInflight int, h *hub) *deviceConn {
-	return &deviceConn{
-		id:          id,
-		conn:        conn,
-		writer:      writer,
-		log:         log,
-		info:        info,
-		tools:       tools,
-		maxInflight: maxInflight,
-		connectedAt: time.Now().UTC(),
-		hub:         h,
-		done:        make(chan struct{}),
-		pending:     make(map[string]chan rpcResult),
+func newDeviceConn(id string, conn *websocket.Conn, writer *wsx.Writer, log *slog.Logger, info protocol.DeviceInfo, tools []protocol.ToolSpec, workspaces []protocol.WorkspaceInfo, defaultWorkspaceID string, maxInflight int, h *hub) *deviceConn {
+	if workspaces == nil {
+		workspaces = []protocol.WorkspaceInfo{}
 	}
+	return &deviceConn{
+		id:                 id,
+		conn:               conn,
+		writer:             writer,
+		log:                log,
+		info:               info,
+		tools:              tools,
+		workspaces:         workspaces,
+		defaultWorkspaceID: defaultWorkspaceID,
+		maxInflight:        maxInflight,
+		connectedAt:        time.Now().UTC(),
+		hub:                h,
+		done:               make(chan struct{}),
+		pending:            make(map[string]chan rpcResult),
+	}
+}
+
+func (d *deviceConn) hasWorkspace(id string) bool {
+	for _, ws := range d.workspaces {
+		if ws.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *deviceConn) snapshot() deviceSnapshot {
 	return deviceSnapshot{
-		ID:          d.id,
-		Name:        d.info.Name,
-		OS:          d.info.OS,
-		Arch:        d.info.Arch,
-		Version:     d.info.Version,
-		ConnectedAt: d.connectedAt,
-		Tools:       d.tools,
+		ID:                 d.id,
+		Name:               d.info.Name,
+		OS:                 d.info.OS,
+		Arch:               d.info.Arch,
+		Version:            d.info.Version,
+		ConnectedAt:        d.connectedAt,
+		Tools:              d.tools,
+		Workspaces:         d.workspaces,
+		DefaultWorkspaceID: d.defaultWorkspaceID,
 	}
 }
 
@@ -257,11 +277,15 @@ func (d *deviceConn) heartbeat(interval time.Duration) {
 	}
 }
 
-func (d *deviceConn) notifyCancel(requestID, callID, reason string) {
+func (d *deviceConn) notifyCancel(requestID, callID, workspaceID, sessionID, reason string) {
 	msg, err := protocol.NewNotification(protocol.MethodCancelled, protocol.CancelledParams{
 		RequestID: requestID,
 		Reason:    reason,
-		Meta:      protocol.CallMeta{CallID: callID},
+		Meta: protocol.CallMeta{
+			CallID:      callID,
+			WorkspaceID: workspaceID,
+			SessionID:   sessionID,
+		},
 	})
 	if err != nil {
 		return

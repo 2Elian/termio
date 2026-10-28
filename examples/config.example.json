@@ -3,8 +3,21 @@
   "device_id": "dev_replace_with_generated_id",
   "device_name": "my-laptop",
   "token": "replace-with-device-token",
-  "workspace": "/home/alice/.lares",
-  "allowed_roots": [],
+  "workspaces": [
+    {
+      "id": "ws_default",
+      "name": "default",
+      "path": "/home/alice/.lares",
+      "extra_roots": []
+    },
+    {
+      "id": "ws_docs",
+      "name": "docs",
+      "path": "/home/alice/projects/docs",
+      "extra_roots": []
+    }
+  ],
+  "default_workspace_id": "ws_default",
   "max_concurrent_calls": 4,
   "call_timeout_ms": 30000,
   "log_level": "info",

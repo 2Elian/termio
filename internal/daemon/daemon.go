@@ -16,7 +16,6 @@ import (
 
 	"termio/internal/config"
 	"termio/internal/protocol"
-	"termio/internal/tools"
 	"termio/internal/version"
 	"termio/internal/wsx"
 )
@@ -38,18 +37,18 @@ type DialFunc func(ctx context.Context, url string, opts *websocket.DialOptions)
 
 // Daemon is the local connector.
 type Daemon struct {
-	cfg      *config.Config
-	log      *slog.Logger
-	registry *tools.Registry
-	dial     DialFunc
+	cfg        *config.Config
+	log        *slog.Logger
+	workspaces *WorkspaceSet
+	dial       DialFunc
 }
 
-// New builds a daemon. The registry must be non-nil.
-func New(cfg *config.Config, log *slog.Logger, registry *tools.Registry) *Daemon {
+// New builds a daemon. The workspace set must be non-nil.
+func New(cfg *config.Config, log *slog.Logger, workspaces *WorkspaceSet) *Daemon {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Daemon{cfg: cfg, log: log, registry: registry, dial: websocket.Dial}
+	return &Daemon{cfg: cfg, log: log, workspaces: workspaces, dial: websocket.Dial}
 }
 
 // Run maintains the connection until ctx is canceled. It never returns a
@@ -128,7 +127,7 @@ func (d *Daemon) runOnce(ctx context.Context) (bool, error) {
 	defer sessionCancel()
 	go d.heartbeat(sessionCtx, conn, heartbeat, sessionCancel)
 
-	disp := newDispatcher(d.registry, writer, d.log, d.cfg.MaxConcurrentCalls, time.Duration(d.cfg.CallTimeoutMS)*time.Millisecond)
+	disp := newDispatcher(d.workspaces, writer, d.log, time.Duration(d.cfg.CallTimeoutMS)*time.Millisecond)
 	defer disp.shutdown()
 
 	err = d.readLoop(sessionCtx, conn, writer, disp)
@@ -153,8 +152,10 @@ func (d *Daemon) register(ctx context.Context, conn *websocket.Conn, writer *wsx
 			Arch:    runtime.GOARCH,
 			Version: version.Version,
 		},
-		Tools:       d.registry.Specs(),
-		MaxInflight: d.cfg.MaxConcurrentCalls,
+		Tools:              d.workspaces.Specs(),
+		Workspaces:         d.workspaces.List(),
+		DefaultWorkspaceID: d.workspaces.DefaultID(),
+		MaxInflight:        d.cfg.MaxConcurrentCalls,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("build register request: %w", err)
@@ -208,7 +209,8 @@ func (d *Daemon) register(ctx context.Context, conn *websocket.Conn, writer *wsx
 	}
 	d.log.Info("registered with gateway",
 		"device_id", d.cfg.DeviceID,
-		"tools", len(d.registry.Specs()),
+		"tools", len(d.workspaces.Specs()),
+		"workspaces", len(d.workspaces.List()),
 		"heartbeat", heartbeat.String())
 	return heartbeat, nil
 }
@@ -283,7 +285,7 @@ func (d *Daemon) readLoop(ctx context.Context, conn *websocket.Conn, writer *wsx
 }
 
 func (d *Daemon) handleToolsList(ctx context.Context, writer *wsx.Writer, msg *protocol.Message) {
-	resp, err := protocol.NewResult(msg.ID, protocol.ToolsListResult{Tools: d.registry.Specs()})
+	resp, err := protocol.NewResult(msg.ID, protocol.ToolsListResult{Tools: d.workspaces.Specs()})
 	if err != nil {
 		resp = protocol.NewErrorResponse(msg.ID, protocol.CodeInternalError, err.Error())
 	}

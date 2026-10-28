@@ -39,6 +39,7 @@ const (
 	CodeDuplicateCall    = -32005
 	CodeOverloaded       = -32010
 	CodeDeviceOffline    = -32011
+	CodeUnknownWorkspace = -32012
 	CodeUnsupportedProto = -32020
 )
 
@@ -94,11 +95,20 @@ type ToolSpec struct {
 
 // RegisterParams is sent by the daemon as the first frame on a connection.
 type RegisterParams struct {
-	ProtocolVersion int        `json:"protocol_version"`
-	MCPVersion      string     `json:"mcp_version,omitempty"`
-	Device          DeviceInfo `json:"device"`
-	Tools           []ToolSpec `json:"tools"`
-	MaxInflight     int        `json:"max_inflight,omitempty"`
+	ProtocolVersion    int             `json:"protocol_version"`
+	MCPVersion         string          `json:"mcp_version,omitempty"`
+	Device             DeviceInfo      `json:"device"`
+	Tools              []ToolSpec      `json:"tools"`
+	Workspaces         []WorkspaceInfo `json:"workspaces,omitempty"`
+	DefaultWorkspaceID string          `json:"default_workspace_id,omitempty"`
+	MaxInflight        int             `json:"max_inflight,omitempty"`
+}
+
+// WorkspaceInfo is the metadata a daemon exposes for a locally authorized
+// workspace. Paths stay local; only IDs and names are reported.
+type WorkspaceInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
 }
 
 // RegisterResult is the gateway's acknowledgement of a registration.
@@ -121,6 +131,8 @@ type ToolsListResult struct {
 type CallMeta struct {
 	ProgressToken string `json:"progressToken,omitempty"`
 	CallID        string `json:"termio/callId,omitempty"`
+	WorkspaceID   string `json:"termio/workspaceId,omitempty"`
+	SessionID     string `json:"termio/sessionId,omitempty"`
 	TimeoutMS     int    `json:"termio/timeoutMs,omitempty"`
 }
 

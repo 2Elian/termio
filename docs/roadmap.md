@@ -15,10 +15,10 @@
 - Go 单二进制地端端子，Windows / macOS / Linux（amd64/arm64）
 - 反向 WebSocket + JSON-RPC 2.0 + MCP 工具形状
 - `search_files` / `read_file` / `system_info`，只读
-- 工作区：默认 `~/.lares`，用户本地切换；工具默认作用于工作区，支持相对路径；端子信息在 `~/.lares/.termio` 且对工具 deny
-- `os.Root` 沙箱、绝对/相对路径、符号链接/junction 逃逸拦截
-- 心跳、重连、4003 取代冷却、并发限制、相对超时、取消、进度
-- `callId` 幂等缓存（10 分钟 / 1024 条）
+- 工作区：默认 `~/.lares`，用户可注册多个本地目录；一个工作区服务多个会话，按 `workspaceId` 路由；工具默认作用于所选工作区，支持相对路径；端子信息在 `~/.lares/.termio` 且对工具 deny
+- `os.Root` 沙箱、绝对/相对路径、符号链接/junction 逃逸拦截；每个工作区独立沙箱与并发额度
+- 心跳、重连、4003 取代冷却、相对超时、取消、进度
+- `(workspace, session, callId)` 幂等缓存（10 分钟 / 1024 条）
 - 用户级自启动（systemd user / LaunchAgent / 计划任务）
 - 单实例参考网关 + HTTP API + E2E 测试
 - VS Code 调试配置、Postman 集合
@@ -40,7 +40,7 @@
    - macOS Intel/Apple Silicon、主流 Linux 发行版的安装/自启动/文件权限
    - Windows 非管理员安装、Defender/AV 误报、长路径
 2. **`termio doctor`**
-   - 配置、workspace/额外 roots 可读性、网关连通性、TLS、token 有效性
+   - 配置、所有工作区/额外 roots 可读性、网关连通性、TLS、token 有效性
    - macOS Full Disk Access、Windows Controlled Folder Access 提示
 3. **日志与诊断**
    - 日志轮转、诊断包导出（脱敏）

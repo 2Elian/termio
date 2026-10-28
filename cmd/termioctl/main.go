@@ -25,17 +25,26 @@ const (
 )
 
 type client struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	baseURL     string
+	token       string
+	http        *http.Client
+	workspaceID string
+	sessionID   string
+}
+
+type workspaceInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
 }
 
 type deviceInfo struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	OS      string `json:"os"`
-	Arch    string `json:"arch"`
-	Version string `json:"version"`
+	ID                 string          `json:"id"`
+	Name               string          `json:"name"`
+	OS                 string          `json:"os"`
+	Arch               string          `json:"arch"`
+	Version            string          `json:"version"`
+	Workspaces         []workspaceInfo `json:"workspaces"`
+	DefaultWorkspaceID string          `json:"default_workspace_id"`
 }
 
 type devicesResponse struct {
@@ -45,27 +54,33 @@ type devicesResponse struct {
 // wireCall accepts both the gateway's simple body shape and a JSON-RPC
 // tools/call envelope, so users can paste either into the REPL.
 type wireCall struct {
-	JSONRPC   string          `json:"jsonrpc,omitempty"`
-	ID        json.RawMessage `json:"id,omitempty"`
-	Method    string          `json:"method,omitempty"`
-	Params    *wireCall       `json:"params,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
-	TimeoutMS int             `json:"timeout_ms,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Meta      *wireMeta       `json:"_meta,omitempty"`
+	JSONRPC     string          `json:"jsonrpc,omitempty"`
+	ID          json.RawMessage `json:"id,omitempty"`
+	Method      string          `json:"method,omitempty"`
+	Params      *wireCall       `json:"params,omitempty"`
+	Name        string          `json:"name,omitempty"`
+	Arguments   json.RawMessage `json:"arguments,omitempty"`
+	TimeoutMS   int             `json:"timeout_ms,omitempty"`
+	CallID      string          `json:"call_id,omitempty"`
+	WorkspaceID string          `json:"workspace_id,omitempty"`
+	SessionID   string          `json:"session_id,omitempty"`
+	Meta        *wireMeta       `json:"_meta,omitempty"`
 }
 
 type wireMeta struct {
-	CallID    string `json:"termio/callId,omitempty"`
-	TimeoutMS int    `json:"termio/timeoutMs,omitempty"`
+	CallID      string `json:"termio/callId,omitempty"`
+	TimeoutMS   int    `json:"termio/timeoutMs,omitempty"`
+	WorkspaceID string `json:"termio/workspaceId,omitempty"`
+	SessionID   string `json:"termio/sessionId,omitempty"`
 }
 
 type normalizedCall struct {
-	Name      string
-	Arguments json.RawMessage
-	TimeoutMS int
-	CallID    string
+	Name        string
+	Arguments   json.RawMessage
+	TimeoutMS   int
+	CallID      string
+	WorkspaceID string
+	SessionID   string
 }
 
 func main() {
@@ -83,6 +98,8 @@ func run(args []string) error {
 	gateway := fs.String("gateway", defaultGatewayURL, "gateway base URL")
 	token := fs.String("token", "", "bearer token (default: TERMIO_TOKEN, then dev-token)")
 	device := fs.String("device", "", "device id (default: first online device)")
+	workspaceID := fs.String("workspace", "", "workspace id (default: device default workspace)")
+	sessionID := fs.String("session", "", "session id sent with every call")
 	timeoutMS := fs.Int("timeout", defaultTimeoutMS, "default tool timeout in milliseconds")
 	payload := fs.String("json", "", "send one JSON tool call and exit")
 	list := fs.Bool("list", false, "list online devices and exit")
@@ -110,9 +127,11 @@ func run(args []string) error {
 		tok = "dev-token"
 	}
 	c := &client{
-		baseURL: base,
-		token:   tok,
-		http:    &http.Client{Timeout: time.Duration(*timeoutMS)*time.Millisecond + 10*time.Second},
+		baseURL:     base,
+		token:       tok,
+		http:        &http.Client{Timeout: time.Duration(*timeoutMS)*time.Millisecond + 10*time.Second},
+		workspaceID: strings.TrimSpace(*workspaceID),
+		sessionID:   strings.TrimSpace(*sessionID),
 	}
 
 	if *list {
@@ -173,10 +192,19 @@ func (c *client) printDevices() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%-24s %-20s %-14s %s\n", "ID", "NAME", "OS/ARCH", "VERSION")
+	fmt.Printf("%-24s %-20s %-14s %-10s %s\n", "ID", "NAME", "OS/ARCH", "VERSION", "DEFAULT WS")
 	for _, d := range devices {
-		fmt.Printf("%-24s %-20s %-14s %s\n", d.ID, d.Name, d.OS+"/"+d.Arch, d.Version)
+		fmt.Printf("%-24s %-20s %-14s %-10s %s\n", d.ID, d.Name, d.OS+"/"+d.Arch, d.Version, d.DefaultWorkspaceID)
 	}
+	return nil
+}
+
+func (c *client) printWorkspaces(device string) error {
+	body, err := c.getJSON("/v1/devices/" + url.PathEscape(device) + "/workspaces")
+	if err != nil {
+		return err
+	}
+	printPretty(body)
 	return nil
 }
 
@@ -213,6 +241,20 @@ func (c *client) send(device, raw string, defaultTimeoutMS int) ([]byte, error) 
 	}
 	if call.CallID != "" {
 		body["call_id"] = call.CallID
+	}
+	workspaceID := call.WorkspaceID
+	if workspaceID == "" {
+		workspaceID = c.workspaceID
+	}
+	if workspaceID != "" {
+		body["workspace_id"] = workspaceID
+	}
+	sessionID := call.SessionID
+	if sessionID == "" {
+		sessionID = c.sessionID
+	}
+	if sessionID != "" {
+		body["session_id"] = sessionID
 	}
 	data, err := json.Marshal(body)
 	if err != nil {
@@ -292,14 +334,16 @@ func (c *client) runPiped(device string, defaultTimeoutMS int) error {
 
 func (c *client) repl(device string, defaultTimeoutMS int) error {
 	fmt.Println("Termio self-test REPL")
-	fmt.Printf("Gateway: %s\n", c.baseURL)
-	fmt.Printf("Device:  %s\n", device)
+	fmt.Printf("Gateway:   %s\n", c.baseURL)
+	fmt.Printf("Device:    %s\n", device)
+	fmt.Printf("Workspace: %s\n", displayOr(c.workspaceID, "(device default)"))
+	fmt.Printf("Session:   %s\n", displayOr(c.sessionID, "(none)"))
 	fmt.Println("Type a JSON tool call, or :help for commands. Ctrl+C / :quit to exit.")
 	fmt.Println()
 
 	scanner := newScanner(os.Stdin)
 	for {
-		fmt.Printf("termio[%s]> ", device)
+		fmt.Printf("termio[%s %s %s]> ", device, displayOr(c.workspaceID, "default"), displayOr(c.sessionID, "-"))
 		if !scanner.Scan() {
 			fmt.Println()
 			return scanner.Err()
@@ -353,6 +397,33 @@ func (c *client) command(line string, device *string, defaultTimeoutMS *int) (bo
 		}
 		printPretty(body)
 		return false, nil
+	case ":workspaces":
+		return false, c.printWorkspaces(*device)
+	case ":workspace", ":ws":
+		if len(fields) < 2 {
+			fmt.Printf("current workspace: %s\n", displayOr(c.workspaceID, "(device default)"))
+			return false, nil
+		}
+		id := fields[1]
+		if id == "-" || id == "default" || id == "reset" {
+			c.workspaceID = ""
+		} else {
+			c.workspaceID = id
+		}
+		fmt.Printf("workspace: %s\n", displayOr(c.workspaceID, "(device default)"))
+		return false, nil
+	case ":session":
+		if len(fields) < 2 {
+			fmt.Printf("current session: %s\n", displayOr(c.sessionID, "(none)"))
+			return false, nil
+		}
+		if fields[1] == "-" || fields[1] == "none" || fields[1] == "reset" {
+			c.sessionID = ""
+		} else {
+			c.sessionID = fields[1]
+		}
+		fmt.Printf("session: %s\n", displayOr(c.sessionID, "(none)"))
+		return false, nil
 	case ":health":
 		body, err := c.getJSON("/healthz")
 		if err != nil {
@@ -384,6 +455,9 @@ func printHelp() {
   :devices              list online devices
   :device <id>          switch device
   :tools                list tools for the current device
+  :workspaces           list workspaces for the current device
+  :workspace [id|-]     show or switch workspace (- resets to default)
+  :session [id|-]       show, set, or clear the current session id
   :health               GET /healthz
   :timeout <ms>         set the default tool timeout
   :quit                 exit
@@ -393,9 +467,10 @@ JSON examples:
   {"name":"search_files","arguments":{"pattern":"*.go","max_results":5}}
   {"name":"read_file","arguments":{"path":"go.mod"}}
   {"name":"read_file","arguments":{"path":"../outside"}}
-  {"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"system_info","arguments":{}}}
+  {"name":"system_info","arguments":{},"workspace_id":"ws_docs","session_id":"chat-42"}
+  {"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"system_info","arguments":{},"_meta":{"termio/workspaceId":"ws_docs","termio/sessionId":"chat-42"}}}
 
-Reuse "call_id" to test idempotent replay:
+Reuse "call_id" to test idempotent replay (the same id in two workspaces is independent):
   {"name":"system_info","arguments":{},"call_id":"my-test-1"}
 `)
 }
@@ -427,6 +502,8 @@ func parseCall(raw string, defaultTimeoutMS int) (normalizedCall, error) {
 	}
 	timeout := w.TimeoutMS
 	callID := w.CallID
+	workspaceID := w.WorkspaceID
+	sessionID := w.SessionID
 	if w.Meta != nil {
 		if w.Meta.TimeoutMS > 0 {
 			timeout = w.Meta.TimeoutMS
@@ -434,11 +511,24 @@ func parseCall(raw string, defaultTimeoutMS int) (normalizedCall, error) {
 		if w.Meta.CallID != "" {
 			callID = w.Meta.CallID
 		}
+		if w.Meta.WorkspaceID != "" {
+			workspaceID = w.Meta.WorkspaceID
+		}
+		if w.Meta.SessionID != "" {
+			sessionID = w.Meta.SessionID
+		}
 	}
 	if timeout <= 0 {
 		timeout = defaultTimeoutMS
 	}
-	return normalizedCall{Name: w.Name, Arguments: args, TimeoutMS: timeout, CallID: callID}, nil
+	return normalizedCall{
+		Name:        w.Name,
+		Arguments:   args,
+		TimeoutMS:   timeout,
+		CallID:      callID,
+		WorkspaceID: strings.TrimSpace(workspaceID),
+		SessionID:   strings.TrimSpace(sessionID),
+	}, nil
 }
 
 func normalizeGateway(raw string) (string, error) {
@@ -470,6 +560,13 @@ func normalizeGateway(raw string) (string, error) {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String(), nil
+}
+
+func displayOr(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func printPretty(data []byte) {

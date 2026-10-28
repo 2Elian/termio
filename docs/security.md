@@ -22,7 +22,7 @@ Termio 的本质是“让云端按需读取用户本机文件”。这是一个�
 
 | 攻击面 | 缓解 |
 |---|---|
-| 路径穿越 / 符号链接逃逸 | workspace/绝对或相对路径 + `os.Root` + 组件级包含检查 |
+| 路径穿越 / 符号链接逃逸 | 每工作区 `os.Root` + 绝对/相对路径校验 + 组件级包含检查 |
 | 工具读取端子配置/令牌 | `$LARES/.termio` 加入沙箱 deny 列表；自定义 config/log 也 deny |
 | 云端被攻破后调用危险工具 | 只读工具白名单，无 shell/写操作 |
 | token 泄露 | 每设备独立 token、TLS、0600 存储、轮换（v1 未实现轮换） |
@@ -70,18 +70,20 @@ X-Termio-Device: <device_id>
 - 地端只注册 `search_files`、`read_file`、`system_info`，都是只读。
 - 没有 shell、PTY、写文件、删除、进程管理、网络工具。
 - 工具名和参数由地端校验；云端无法调用未注册的工具。
-- 每台设备只打开自己的 `workspace` 和额外 `allowed_roots`；不同租户的文件在物理上由不同地端进程隔离。
-- 工作区由本地用户选择，默认 `$LARES`（`~/.lares`）；云端不能通过工具参数更改工作区。选择工作区等于授权 Agent 访问该目录，见 [workspace.md](workspace.md)。
-- 端子信息（config、token、日志）在 `$LARES/.termio`，即使它在默认工作区内也被沙箱 deny，工具不可读写；自定义 config/log 位于工作区时同样 deny。
+- 每台设备为每个已注册工作区打开独立 `os.Root`；不同租户的文件在物理上由不同地端进程隔离。
+- 工作区由本地用户注册，默认 `$LARES`（`~/.lares`）；云端只能在已注册 ID 中选择，不能新增路径，也不能通过工具参数指定文件系统路径。注册工作区等于授权 Agent 访问该目录，见 [workspace.md](workspace.md)。
+- `session_id` 只是云端会话标签，**不是鉴权主体或隔离边界**；同一设备的所有会话共享该设备 token 的权限。需要跨租户隔离时必须使用不同设备/token。
+- 每次调用只进入一个工作区；工作区之间不能通过相对路径或绝对路径串目录。
+- 端子信息（config、token、日志）在 `$LARES/.termio`，对**所有**工作区 deny；自定义 config/log 位于任何工作区时同样 deny。
 - 云端 Agent 的工具 stub 应只暴露业务需要的工具；不要把整个 registry 无差别地交给模型。
 
 ## 沙箱
 
 实现位于 `internal/tools/sandbox.go`：
 
-- workspace 和每个额外 allowed root 用 `os.OpenRoot` 打开。
-- 空路径/相对路径以 workspace 为基准；相对路径的 `..` 不能逃出 workspace；绝对路径必须在 workspace 或额外根内。
-- `$LARES/.termio` 以及实际 config/log 路径是 deny 路径；workspace 或额外根不能设在 deny 路径内。
+- 每个工作区及其额外根都用 `os.OpenRoot` 打开；一个调用只会使用其中一个工作区的 sandbox/registry。
+- 空路径/相对路径以该调用所选工作区为基准；相对路径的 `..` 不能逃出工作区；绝对路径必须在该工作区或其额外根内。
+- `$LARES/.termio` 以及实际 config/log 路径是全局 deny 路径；任何工作区或额外根都不能设在 deny 路径内。
 - 拒绝 UNC、Windows 设备路径、`C:foo`、NTFS ADS 和越界 `..`。
 - 请求路径先规范化（符号链接、8.3 短名），再与 root 做组件级比较。
 - `os.Root` 在打开时再次阻止符号链接/junction 逃逸，消除 check-then-open 的 TOCTOU。
@@ -94,7 +96,8 @@ X-Termio-Device: <device_id>
 - 文件可能在检查后、读取前被替换；`os.Root` 保护的是路径解析，不保护文件内容一致性。
 - 读取正在写入的文件可能得到不完整内容；`read_file` 会如实报告 `size` 和 `truncated`。
 - macOS TCC、Windows Controlled Folder Access、企业 AV 可能在 `os.Root` 之外拒绝访问；工具会返回权限错误。
-- 根目录本身如果是 `/`、盘符根或 home，暴露面很大；`init`/`workspace set` 会打印 warning，`doctor` 尚未实现，配置时应尽量收窄。
+- 根目录本身如果是 `/`、盘符根或 home，暴露面很大；`init`/`workspace add`/`set` 会打印 warning，`doctor` 尚未实现，配置时应尽量收窄。
+- 所有已注册工作区都对云端可见（ID/名称）；云端可以在其中任意选择。只注册确实愿意授权给 Agent 的目录。
 
 ## 操作系统控制
 
@@ -145,7 +148,7 @@ X-Termio-Device: <device_id>
 1. 在网关侧吊销/替换该设备 token（生产系统），或停用共享 token。
 2. 在地端停止服务：`termio stop`，或直接结束进程。
 3. 检查地端与网关日志中的异常 callId、工具调用频率、来源 IP。
-4. 缩小 `workspace`/`allowed_roots`，重新生成设备 ID 与 token。
+4. 缩小 `workspaces`（删除不必要的工作区或额外根），重新生成设备 ID 与 token。
 5. 如涉及文件泄露，按租户的数据安全流程处理。
 
 ## 已知限制
@@ -154,4 +157,5 @@ X-Termio-Device: <device_id>
 - 无设备配对/OAuth、mTLS、token 轮换。
 - 无写操作审批、能力声明、审计数据库。
 - 无持久化幂等日志；地端重启后重试可能重复执行。
-- 只读工具，但 `read_file` 仍可能读取敏感文件；workspace/额外 roots 必须按最小权限配置。
+- 只读工具，但 `read_file` 仍可能读取敏感文件；所有工作区/额外 roots 必须按最小权限配置。
+- `session_id` 不提供额外权限隔离；网关按设备 token 鉴权。
