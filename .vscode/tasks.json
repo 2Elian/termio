@@ -6,16 +6,16 @@
       "type": "process",
       "command": "go",
       "args": [
-        "run", "./cmd/termio", "init",
+        "run", "./scripts/prepare-debug",
         "--config", "${workspaceFolder}/.debug/config.json",
         "--url", "ws://127.0.0.1:8787/ws",
         "--token", "dev-token",
         "--device-id", "dev_debug",
         "--device-name", "debug-device",
         "--workspace", "${workspaceFolder}",
-        "--log-file", "${workspaceFolder}/.debug/termio.log",
-        "--log-level", "debug",
-        "--force"
+        "--extra-workspace", "${workspaceFolder}/.debug/ws-docs",
+        "--extra-workspace-id", "ws_docs",
+        "--log-file", "${workspaceFolder}/.debug/termio.log"
       ],
       "options": {
         "cwd": "${workspaceFolder}"

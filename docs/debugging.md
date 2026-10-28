@@ -31,8 +31,8 @@
 2. 按 `F5`，选择 **Termio: Gateway + Daemon**。
 3. 两个配置会并行启动：
    - Gateway：`127.0.0.1:8787`，token `dev-token`，日志级别 debug。
-   - Daemon：读取 `.debug/config.json`，device ID `dev_debug`，默认工作区为当前仓库；可手工添加更多工作区后用 `Termio Daemon (no init)` 启动。
-4. Daemon 启动前会执行 `termio: prepare debug config`，自动生成：
+   - Daemon：读取 `.debug/config.json`，device ID `dev_debug`，默认工作区为当前仓库，并自动注册第二个工作区 `ws_docs`。
+4. Daemon 启动前会执行 `termio: prepare debug config`（`scripts/prepare-debug`），自动生成：
 
 ```json
 {
@@ -46,6 +46,12 @@
       "name": "default",
       "path": "<workspace>",
       "extra_roots": []
+    },
+    {
+      "id": "ws_docs",
+      "name": "docs",
+      "path": "<workspace>/.debug/ws-docs",
+      "extra_roots": []
     }
   ],
   "default_workspace_id": "ws_default",
@@ -56,11 +62,27 @@
 }
 ```
 
-- 组合调试会先执行一次初始化任务；单独启动 **Termio Daemon** 也会先初始化。
-- 每次初始化都会覆盖 `.debug/config.json`（`--force`）。
-- 想保留现场或测试多工作区，先手工编辑 `.debug/config.json`，再使用 **Termio Daemon (no init)**；否则 task 会把配置重置成单工作区。
-- 不走 VS Code task 时，也可以运行 `make debug-init`（Windows 无 make 时直接跑 tasks.json 里那条 `go run ... init ...` 命令）。
+- 组合调试和单独启动 **Termio Daemon** 都会先执行准备任务。
+- 准备任务每次都会覆盖 `.debug/config.json` 为标准双工作区（`ws_default` + `ws_docs`），并确保 `.debug/ws-docs/notes.md` 存在。
+- 想保留自己手改的配置，使用 **Termio Daemon (no init)**；此时需要自己保证 config 有效。
+- 不走 VS Code task 时，可运行 `make debug-init`，或直接 `go run ./scripts/prepare-debug ...`。
 - 两个进程同时启动时，daemon 可能先于 gateway 连接失败；它会 1 秒后重试，属正常现象。
+
+### 只调试 daemon（网关用 PowerShell）
+
+这也是推荐流程：网关改动少，不必进调试器。
+
+1. PowerShell 启动网关：
+
+```powershell
+cd E:\Project\Termio
+go run ./cmd/termio-gateway --addr 127.0.0.1:8787 --token dev-token --log-level debug
+```
+
+2. VS Code 按 `F5`，选择 **Termio Daemon**。
+3. 准备任务自动生成双工作区配置，daemon 在 Delve 下启动。
+4. Postman 发请求，断点只停在 daemon 侧。
+5. 只想看网关内部时，再用 **Termio Gateway** 或组合配置。
 
 ### 建议断点
 
@@ -394,5 +416,5 @@ HTTP 状态仍是 200，body 里 `isError: true`。这就是 Agent 应该读到�
 | 同一设备反复 4003 | 真实 daemon 和 Postman 用了同一个 deviceId；换一个 |
 | 端口 8787 被占用 | 修改 launch.json 的 `--addr`、tasks.json 的 `--url`、Postman 的 `baseUrl`，保持三处一致 |
 | 搜索返回 root 外错误 | 这是沙箱在正常工作；确认调用的 `workspace_id` 与目标目录一致 |
-| 修改配置后没生效 | `Termio Daemon` 每次会 `--force` 重建；用 `Termio Daemon (no init)` 或改 tasks.json |
+| 修改配置后没生效 | `Termio Daemon` 每次会执行 `prepare-debug` 重建；用 `Termio Daemon (no init)` 保留手改配置 |
 | Windows 调试器找不到 dlv | 安装 Go 扩展，或 `go install github.com/go-delve/delve/cmd/dlv@latest` |

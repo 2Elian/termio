@@ -43,100 +43,42 @@ termio-gateway  ── WebSocket（地端主动外连）──▶  termio daemon
 
 ---
 
-## 1. 准备：两个工作区 + 三个进程
+## 1. 最短调试路径（先做这一步）
 
-以下命令在仓库根目录、Git Bash 中执行。PowerShell 把 `mkdir -p` 换成 `New-Item -ItemType Directory -Force`，把 `$PWD` 换成 `(Get-Location).Path`。
+不需要手工 `init`，也不需要自己 `workspace add`。VS Code 的预启动任务会调用 `go run ./scripts/prepare-debug`，自动生成：
 
-### 1.1 构建（可选）
+- `.debug/config.json`：`ws_default`（仓库根）+ `ws_docs`（`.debug/ws-docs`）；
+- `.debug/ws-docs/notes.md`：跨工作区测试文件；
+- 网关地址、`dev_debug` 设备 ID、`dev-token`、debug 日志路径。
 
-```bash
-go build -o bin/termio ./cmd/termio
-go build -o bin/termio-gateway ./cmd/termio-gateway
-go build -o bin/termioctl ./cmd/termioctl
-```
+### 1.1 方式 A：一键启动网关 + daemon
 
-调试时也可以全部用 `go run`；VS Code 则用 Delve 启动。
+1. VS Code 打开 `E:\Project\Termio`。
+2. `F5`，选择 **Termio: Gateway + Daemon**。
+3. 两个进程都会在 Delve 下启动：
+   - Gateway：`127.0.0.1:8787`，token `dev-token`，debug 日志；
+   - Daemon：读取自动生成的 `.debug/config.json`，两个工作区。
+4. 在 `internal/daemon/dispatcher.go:handleCall`、`internal/gateway/gateway.go:handleCall` 等位置下断点。
+5. 用 Postman 发请求（见 1.3）。
 
-### 1.2 启动网关
+### 1.2 方式 B：PowerShell 起网关 + VS Code 调试 daemon（你描述的方式）
 
-```bash
+完全可行，推荐这样分工：网关不常改，用 PowerShell；daemon 是调试重点，用 F5。
+
+**PowerShell：**
+
+```powershell
+cd E:\Project\Termio
 go run ./cmd/termio-gateway --addr 127.0.0.1:8787 --token dev-token --log-level debug
 ```
 
-预期日志：`gateway listening`（或等价启动日志）。此时还没有设备：
+**VS Code：**
 
-```bash
-curl -H "Authorization: Bearer dev-token" http://127.0.0.1:8787/v1/devices
-# {"devices":[]}
-```
+1. `F5`，选择 **Termio Daemon**。
+2. 它会先执行 `termio: prepare debug config`（自动生成双工作区配置），再在 Delve 下启动 daemon。
+3. 断点命中后，HTTP 请求会停在 daemon 的处理链路上。
 
-### 1.3 生成调试配置并注册第二个工作区
-
-```bash
-mkdir -p .debug/ws-docs
-
-go run ./cmd/termio init \
-  --config .debug/config.json \
-  --url ws://127.0.0.1:8787/ws \
-  --token dev-token \
-  --device-id dev_debug \
-  --device-name debug-device \
-  --workspace "$PWD" \
-  --log-file "$PWD/.debug/termio.log" \
-  --log-level debug \
-  --force
-
-go run ./cmd/termio workspace add \
-  --config .debug/config.json \
-  --id ws_docs \
-  --name docs \
-  .debug/ws-docs
-
-go run ./cmd/termio workspace list --config .debug/config.json
-```
-
-预期 `workspace list`：
-
-```text
-Config: .../.debug/config.json
-* ws_default   default   E:\Project\Termio
-  ws_docs      docs      E:\Project\Termio\.debug\ws-docs
-```
-
-`.debug/config.json` 的关键字段：
-
-```json
-{
-  "workspaces": [
-    {"id": "ws_default", "name": "default", "path": "E:\\Project\\Termio", "extra_roots": []},
-    {"id": "ws_docs", "name": "docs", "path": "E:\\Project\\Termio\\.debug\\ws-docs", "extra_roots": []}
-  ],
-  "default_workspace_id": "ws_default",
-  "max_concurrent_calls": 4
-}
-```
-
-放一个测试文件：
-
-```bash
-echo "hello from docs" > .debug/ws-docs/notes.md
-echo "root readme" > .debug/root-only.txt
-```
-
-### 1.4 启动 daemon
-
-方式 A：命令行
-
-```bash
-go run ./cmd/termio run --config .debug/config.json
-```
-
-方式 B：VS Code
-
-1. 先启动 **Termio Gateway**。
-2. 选择 **Termio Daemon (no init)**，**不要**用 `Termio: Gateway + Daemon`。
-   - 组合配置的 `preLaunchTask` 会执行 `init --force`，把 `.debug/config.json` 重置成单工作区。
-   - 手工配置好两个工作区后，用 `no init` 保留现场。
+> 只有你想保留自己手改的 `.debug/config.json` 时，才用 **Termio Daemon (no init)**。`Termio Daemon` 和组合配置都会先重置成标准双工作区环境。
 
 预期 daemon 日志：
 
@@ -145,33 +87,66 @@ termio starting ... default_workspace=ws_default workspace=<repo> workspaces=2 t
 registered with gateway device_id=dev_debug tools=3 workspaces=2 heartbeat=20s
 ```
 
-### 1.5 验证注册结果
+### 1.3 Postman 最短请求序列
+
+导入 [`postman/termio.postman_collection.json`](postman/termio.postman_collection.json)，变量默认：
+
+```text
+baseUrl    http://127.0.0.1:8787
+token      dev-token
+deviceId   dev_debug
+workspaceId ws_default
+```
+
+按顺序跑：
+
+1. **List devices (run first)**：脚本写入 `deviceId`、默认 `workspaceId`，第二个工作区写入 `otherWorkspaceId`（应该是 `ws_docs`）。
+2. **List workspaces**：确认 `ws_default` + `ws_docs`，且没有本地路径。
+3. **System info**：默认工作区；结果 `_meta.termio/workspaceId=ws_default`。
+4. **Workspace call (explicit workspace)**：`ws_docs` + 独立 session；结果 `_meta` 应回传 `ws_docs`。
+5. **Read file**：默认读仓库 `go.mod`；想读 docs 工作区，把 body 改成：
+   ```json
+   {"name":"read_file","arguments":{"path":"notes.md"},"workspace_id":"ws_docs","session_id":"postman-session"}
+   ```
+   应返回 `hello from docs workspace`。
+6. **Unknown workspace**：400 + `-32012`。
+7. **Unknown tool**：400 + `-32602`。
+8. **Missing auth**：401。
+
+### 1.4 验证注册结果（可选）
 
 ```bash
 curl -H "Authorization: Bearer dev-token" http://127.0.0.1:8787/v1/devices
 curl -H "Authorization: Bearer dev-token" http://127.0.0.1:8787/v1/devices/dev_debug/workspaces
 ```
 
-应看到：
+应看到两个工作区，且**没有** `E:\...` 路径。路径泄露应视为 bug。
 
-```json
-{
-  "device_id": "dev_debug",
-  "workspaces": [
-    {"id": "ws_default", "name": "default"},
-    {"id": "ws_docs", "name": "docs"}
-  ],
-  "default_workspace_id": "ws_default"
-}
-```
-
-**路径没有出现在响应里**，这是预期行为。如果看到 `E:\...`，说明有字段漏了脱敏，应视为 bug。
-
-### 1.6 启动 REPL
+### 1.5 命令行 REPL（可选）
 
 ```bash
-go run ./cmd/termioctl --gateway http://127.0.0.1:8787 --token dev-token --device dev_debug --workspace ws_default --session debug-session
+go run ./cmd/termioctl \
+  --gateway http://127.0.0.1:8787 --token dev-token \
+  --device dev_debug --workspace ws_default --session debug-session
 ```
+
+它只是把 Postman 的第一步换成终端输入，后续链路完全相同。
+
+### 1.6 手工配置（只在需要自定义时）
+
+自动配置不满足时，可以自己做，然后用 **Termio Daemon (no init)** 避免被覆盖：
+
+```bash
+mkdir -p .debug/ws-docs
+go run ./cmd/termio init --config .debug/config.json \
+  --url ws://127.0.0.1:8787/ws --token dev-token \
+  --device-id dev_debug --device-name debug-device \
+  --workspace "$PWD" --log-file "$PWD/.debug/termio.log" --log-level debug --force
+go run ./cmd/termio workspace add --config .debug/config.json \
+  --id ws_docs --name docs .debug/ws-docs
+```
+
+`.debug/config.json` 会包含 `workspaces` 数组和 `default_workspace_id`，`workspace list` 应显示两行。
 
 ---
 
@@ -1036,7 +1011,7 @@ daemon（`.debug/termio.log`，`--log-level debug`）：
 | 路径越界 | `sandbox.Resolve` 的 `canonical` 与 `entry.display`；相对路径是否以工作区为基准 |
 | `.termio` 仍可读 | deny 列表是否包含 `AppDataDir`；`IsDenied` 是否被调用 |
 | 修改工作区后不生效 | 新增/删除/默认变更是否重启 daemon；是否用了 `Termio Daemon (no init)` |
-| VS Code 配置被重置 | 组合调试或 `Termio Daemon` 会执行 `init --force`；改用 `no init` |
+| VS Code 配置被重置 | 组合调试或 `Termio Daemon` 会执行 `prepare-debug`；改用 `no init` 保留手改配置 |
 | 对端收不到取消 | `notifyCancel` 是否带 `requestId`；daemon `cancelCall` 的 `rpcToCall` 是否有该 id |
 
 ---

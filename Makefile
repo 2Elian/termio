@@ -39,7 +39,16 @@ build-all:
 
 debug-init:
 	mkdir -p .debug
-	$(GO) run ./cmd/termio init --config .debug/config.json --url ws://127.0.0.1:8787/ws --token dev-token --device-id dev_debug --device-name debug-device --workspace "$(CURDIR)" --log-file "$(CURDIR)/.debug/termio.log" --log-level debug --force
+	$(GO) run ./scripts/prepare-debug \
+		--config .debug/config.json \
+		--url ws://127.0.0.1:8787/ws \
+		--token dev-token \
+		--device-id dev_debug \
+		--device-name debug-device \
+		--workspace "$(CURDIR)" \
+		--extra-workspace "$(CURDIR)/.debug/ws-docs" \
+		--extra-workspace-id ws_docs \
+		--log-file "$(CURDIR)/.debug/termio.log"
 
 clean:
 	rm -rf bin dist tmp
