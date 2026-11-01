@@ -5,6 +5,7 @@
 *.log
 .DS_Store
 .idea/
+.vscode/
 .env
 /devices.json
 /devices.local.json

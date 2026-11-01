@@ -15,7 +15,7 @@
 - Go 1.24+
 - Delve（Go 扩展会提示安装；也可手动 `go install github.com/go-delve/delve/cmd/dlv@latest`）
 
-仓库已包含：
+`.vscode/` 属于本地编辑器配置，已加入 `.gitignore`，不随仓库分发。本地需要包含：
 
 ```
 .vscode/launch.json   # Gateway / Daemon / 组合调试
@@ -23,7 +23,7 @@
 .vscode/extensions.json
 ```
 
-`.debug/` 和其中的开发 token 已加入 `.gitignore`。
+本地没有这些文件时，可从本仓库历史找回：先 `git log --oneline -- .vscode` 找到最后一次提交，再 `git show <commit>:.vscode/launch.json`（其他文件同理）。`.debug/` 和其中的开发 token 也已加入 `.gitignore`。
 
 ### 启动组合调试
 
