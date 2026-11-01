@@ -188,9 +188,9 @@ def call_tool(name, arguments, timeout_ms=30000, call_id=None,
 
 ## 调试
 
-仓库自带 VS Code 调试配置：
+VS Code 调试配置放在本地 `.vscode/`，已加入 `.gitignore`，不随仓库分发（本地配置说明见 [docs/debugging.md](docs/debugging.md)）：
 
-- `F5` → `Termio: Gateway + Daemon` 一键启动，自动生成 `.debug/config.json`（`ws_default` + `ws_docs` 两个工作区）和测试文件
+- `F5` → `Termio: Gateway + Daemon` 一键启动（需本地已配置），自动生成 `.debug/config.json`（`ws_default` + `ws_docs` 两个工作区）和测试文件
 - 也可以 PowerShell 起网关、VS Code 只 F5 调试 `Termio Daemon`，Postman 发请求
 - 断点覆盖注册、HTTP→WS 转发、工作区路由、调度、沙箱和工具执行
 - Postman 可以导入 HTTP 集合；也可以**把 Postman 当成一台假设备**，在 WebSocket 里手动接收网关推送并回复
